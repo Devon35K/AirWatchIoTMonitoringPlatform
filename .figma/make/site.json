@@ -1,0 +1,10 @@
+{
+  "description": "Monitor indoor CO₂, temperature, and humidity in real time, review trends, and manage AirWatch device controls from web or mobile.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
