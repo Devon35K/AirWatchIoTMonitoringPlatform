@@ -3,6 +3,7 @@ export function parseDeviceStatus(value) {
   if (!isRecord(value)) throw new Error("Invalid AirWatch status response");
   const wifi = value.wifi;
   if (
+    typeof value.setupRequired !== "boolean" ||
     typeof value.valid !== "boolean" ||
     !isFiniteNumber(value.co2) ||
     !isFiniteNumber(value.temperature) ||

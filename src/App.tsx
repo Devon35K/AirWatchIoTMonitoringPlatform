@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import QRCode from "qrcode";
 import { useAirWatch } from "./hooks/useAirWatch";
-import { saveWiFiCredentials, setBuzzerMuted, setDisplayTheme, setFanMode } from "./services/airwatchApi";
+import { completeDeviceSetup, saveWiFiCredentials, setBuzzerMuted, setDisplayTheme, setFanMode } from "./services/airwatchApi";
 
 type IconName =
   | "air"
@@ -853,6 +853,7 @@ function ControlsPage({ toast }: { toast: (text: string) => void }) {
 function WifiPage({ toast, qrUrl }: { toast: (text: string) => void; qrUrl: string }) {
   const { status, error, refresh, accessKey: key, setAccessKey: setKey } = useAirWatch();
   const [ssid, setSSID] = useState(""); const [password, setPassword] = useState(""); const [message, setMessage] = useState(""); const [saving, setSaving] = useState(false);
+  const [newKey, setNewKey] = useState(""); const [apPassword, setApPassword] = useState("");
   const address = window.location.origin;
   const saveNetwork = async (event: FormEvent) => {
     event.preventDefault(); setMessage("");
@@ -862,11 +863,18 @@ function WifiPage({ toast, qrUrl }: { toast: (text: string) => void; qrUrl: stri
     catch (e) { setMessage(e instanceof Error ? e.message : "Could not configure Wi-Fi"); if (e instanceof Error && e.message.includes("Incorrect device access key")) setKey(""); }
     finally { setSaving(false); }
   };
+  const finishSetup = async (event: FormEvent) => {
+    event.preventDefault(); setMessage(""); setSaving(true);
+    try { await completeDeviceSetup(newKey, apPassword); setNewKey(""); setApPassword(""); setMessage("Security saved. Reconnect to the AirWatch access point using the password you chose."); toast("AirWatch security configured"); window.setTimeout(() => void refresh(), 1000); }
+    catch (e) { setMessage(e instanceof Error ? e.message : "Could not configure device security"); }
+    finally { setSaving(false); }
+  };
   return <div className="page-stack">
     <PageHeading eyebrow="Local network" title="Wi-Fi & connectivity" description="Device network status and 2.4 GHz network setup." action={<button className="secondary-btn" onClick={() => void refresh()}><Icon name="refresh" size={17} />Reconnect</button>} />
     <div className="wifi-layout"><div className="wifi-main">
       <section className="panel network-hero"><div className="signal-orb"><Icon name="wifi" size={32} /></div><div><span className="eyebrow">Connection status</span><h2>{status?.wifi.connected ? `Connected to ${status.wifi.ssid}` : "Router disconnected"}</h2><p>{status?.wifi.connected ? `Device IP ${status.wifi.ip}` : error || "Check device or connect to its setup access point"}</p></div><StatusDot online={!!status} label={status ? status.wifi.connected ? "Online" : "Setup mode" : "Offline"} /></section>
       <section className="panel network-details"><h2>Network details</h2><div className="detail-grid"><div><span>Router SSID</span><b>{status?.wifi.ssid || "Not connected"}</b></div><div><span>Device IP address</span><b>{status?.wifi.ip || "—"}</b></div><div><span>Setup access point</span><b>{status?.wifi.apSSID || "Unavailable"}</b></div><div><span>Setup AP address</span><b>{status?.wifi.apIP || "192.168.4.1"}</b></div><div><span>Dashboard address</span><b>{address}</b></div><div><span>Sensor</span><b>{status?.valid ? "SCD41 available" : "Waiting for SCD41"}</b></div></div></section>
+      {status?.setupRequired && <section className="panel setup-steps"><h2>Secure your AirWatch device</h2><p>The setup access point currently has no password. Choose its password and a control key to finish first-time setup.</p><form onSubmit={finishSetup} className="wifi-form"><label>New device control key<input type="password" autoComplete="new-password" value={newKey} onChange={(e) => setNewKey(e.target.value)} minLength={12} maxLength={64} required /></label><label>New setup Wi-Fi password<input type="password" autoComplete="new-password" value={apPassword} onChange={(e) => setApPassword(e.target.value)} minLength={8} maxLength={63} required /></label><button className="secondary-btn" type="submit" disabled={saving}>{saving ? "Saving…" : "Set passwords"}</button>{message && <p role="status">{message}</p>}</form></section>}
       <section className="panel setup-steps"><h2>Configure Wi-Fi</h2><p>The device supports 2.4 GHz Wi-Fi. If it is offline, connect your browser to its setup access point first.</p><form onSubmit={saveNetwork} className="wifi-form"><label>AirWatch access key<input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} required /></label><label>Network name (SSID)<input value={ssid} onChange={(e) => setSSID(e.target.value)} maxLength={32} required /></label><label>Network password<input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} maxLength={63} /></label><button className="secondary-btn" type="submit" disabled={saving}>{saving ? "Sending…" : "Save Wi-Fi credentials"}</button>{message && <p role="status">{message}</p>}</form></section>
     </div><aside className="panel qr-card"><span className="eyebrow">Quick access</span><h2>Open this dashboard</h2><p>Scan while connected to the same network as the device.</p><div className="qr-frame">{qrUrl ? <img src={qrUrl} alt={`QR code for ${address}`} /> : <div className="qr-loading">Generating…</div>}</div><div className="url-chip"><Icon name="shield" size={16} /><span>{address}</span></div><small>For device-served offline use, this URL is the ESP32 address.</small></aside></div>
   </div>;
@@ -1383,7 +1391,7 @@ function ApiPage() {
 export default function App() {
   const { status, lastSuccess, accessKey, setAccessKey, refresh } = useAirWatch();
   const [active, setActive] = useState("Overview");
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [showcase, setShowcase] = useState<"web" | "mobile" | "device">("web");
   const [toast, setToast] = useState("");

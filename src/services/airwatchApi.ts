@@ -1,6 +1,7 @@
 import { apiErrorMessage, normalizeApiError, parseDeviceStatus, parseMutationResult, parseSensorHistory } from "./airwatchContract.js";
 
 export interface DeviceStatus {
+  setupRequired: boolean;
   valid: boolean; co2: number; temperature: number; humidity: number; quality: string;
   displayTheme: "light" | "dark";
   fanOn: boolean; fanMode: "auto" | "on" | "off"; muted: boolean; alarmActive: boolean;
@@ -31,6 +32,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } finally { window.clearTimeout(timer); }
 }
 export const getDeviceStatus = () => request<DeviceStatus>("/api/status", { cache: "no-store" });
+export const completeDeviceSetup = (accessKey: string, apPassword: string) =>
+  request<{ ok: boolean }>("/api/setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accessKey, apPassword }) });
 export const getSensorHistory = () => request<SensorHistory>("/api/history", { cache: "no-store" });
 async function control(body: object, key: string) {
   return request<{ ok: boolean }>("/api/control", { method: "POST", headers: { "Content-Type": "application/json", "X-AirWatch-Key": key }, body: JSON.stringify(body) });
