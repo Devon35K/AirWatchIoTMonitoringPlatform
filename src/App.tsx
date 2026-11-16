@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import QRCode from "qrcode";
+import { useAirWatch } from "./hooks/useAirWatch";
+import { saveWiFiCredentials, setBuzzerMuted, setFanMode } from "./services/airwatchApi";
 
 type IconName =
   | "air"
@@ -254,21 +256,6 @@ const navItems = [
   ["About AirWatch", "info"],
 ] as const;
 
-const historyRows = [
-  ["10:42:18 AM", 742, 27.4, 54, "Excellent"],
-  ["10:41:48 AM", 756, 27.3, 54, "Excellent"],
-  ["10:41:18 AM", 781, 27.3, 55, "Excellent"],
-  ["10:40:48 AM", 826, 27.2, 55, "Good"],
-  ["10:40:18 AM", 843, 27.1, 56, "Good"],
-  ["10:39:48 AM", 811, 27.0, 55, "Good"],
-  ["10:39:18 AM", 786, 26.9, 54, "Excellent"],
-  ["10:38:48 AM", 768, 26.8, 54, "Excellent"],
-];
-
-const co2Points = [32, 37, 31, 42, 40, 52, 48, 61, 58, 67, 61, 55, 50, 45, 48, 41, 44, 37, 40, 34];
-const tempPoints = [72, 70, 73, 68, 66, 64, 62, 59, 60, 57, 54, 52, 50, 51, 48, 46, 47, 44, 43, 42];
-const humPoints = [52, 50, 53, 54, 52, 48, 46, 48, 44, 42, 43, 40, 42, 39, 38, 40, 37, 36, 38, 35];
-
 function Sparkline({
   points,
   color = "#38bdf8",
@@ -278,9 +265,12 @@ function Sparkline({
   color?: string;
   fill?: boolean;
 }) {
-  const coords = points.map((v, i) => `${(i / (points.length - 1)) * 100},${v}`).join(" ");
+  const min = Math.min(...points);
+  const span = Math.max(1, Math.max(...points) - min);
+  const plotted = points.map((value, i) => ({ value, x: (i / Math.max(1, points.length - 1)) * 100, y: 95 - ((value - min) / span) * 85 }));
+  const coords = plotted.map(({ x, y }) => `${x},${y}`).join(" ");
   return (
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="sparkline" aria-hidden="true">
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="sparkline" role="img" aria-label="Sensor measurement history">
       {fill && <polygon points={`0,100 ${coords} 100,100`} fill={color} opacity=".09" />}
       <polyline
         points={coords}
@@ -289,6 +279,7 @@ function Sparkline({
         strokeWidth="2.2"
         vectorEffect="non-scaling-stroke"
       />
+      {plotted.map(({ value, x, y }, i) => <circle key={i} cx={x} cy={y} r="1.7" fill={color}><title>{value}</title></circle>)}
     </svg>
   );
 }
@@ -347,6 +338,9 @@ function MetricCard({
   note,
   color,
   icon,
+  points,
+  quality,
+  updated,
 }: {
   type: "co2" | "temp" | "humidity";
   title: string;
@@ -355,6 +349,9 @@ function MetricCard({
   note: string;
   color: string;
   icon: IconName;
+  points: number[];
+  quality: string;
+  updated: string;
 }) {
   return (
     <article className={`metric-card ${type}`}>
@@ -381,11 +378,11 @@ function MetricCard({
           <div className="quality-copy">
             <span className="quality-tag">
               <i style={{ background: color }} />
-              Excellent
+              {quality}
             </span>
-            <p>Fresh, well-ventilated air</p>
+            <p>ESP32 sensor classification</p>
             <small>
-              <Icon name="clock" size={13} /> Updated 8 sec ago
+              <Icon name="clock" size={13} /> {updated}
             </small>
           </div>
         </div>
@@ -396,10 +393,10 @@ function MetricCard({
               {value}
               <span>{unit}</span>
             </div>
-            <span className="trend-up">↗ 0.3 {unit} today</span>
+            <span className="trend-up">Live device samples</span>
           </div>
           <div className="mini-chart">
-            <Sparkline points={type === "temp" ? tempPoints : humPoints} color={color} fill />
+            {points.length > 1 && <Sparkline points={points} color={color} fill />}
           </div>
         </div>
       )}
@@ -422,14 +419,27 @@ function MetricCard({
 }
 
 function MonitorChart({ compact = false }: { compact?: boolean }) {
-  const [metrics, setMetrics] = useState({ co2: true, temp: true, hum: true });
+  const { samples, status } = useAirWatch();
+  const [metric, setMetric] = useState<"co2" | "temp" | "hum">("co2");
   const [range, setRange] = useState("15 min");
+  const rangeSeconds: Record<string, number> = { "5 min": 300, "15 min": 900, "30 min": 1800, "1 hr": 3600 };
+  const recent = samples.slice(-20);
+  const newest = recent[recent.length - 1];
+  const chartSamples = newest ? recent.filter((sample) => newest.epoch && sample.epoch ? newest.epoch - sample.epoch <= rangeSeconds[range] : newest.uptime - sample.uptime <= rangeSeconds[range]) : [];
+  const co2Values = chartSamples.map((s) => s.co2);
+  const tempValues = chartSamples.map((s) => s.temp);
+  const humidityValues = chartSamples.map((s) => s.hum);
+  const selectedValues = metric === "co2" ? co2Values : metric === "temp" ? tempValues : humidityValues;
+  const selectedColor = metric === "co2" ? "#06b6d4" : metric === "temp" ? "#f59e0b" : "#3b82f6";
+  const selectedMin = selectedValues.length ? Math.min(...selectedValues) : 0;
+  const selectedMax = selectedValues.length ? Math.max(...selectedValues) : 0;
+  const unit = metric === "co2" ? "ppm" : metric === "temp" ? "°C" : "%";
   return (
     <section className={`panel chart-panel ${compact ? "compact-chart" : ""}`}>
       <div className="panel-title-row">
         <div>
           <h2>{compact ? "CO₂ trend" : "Real-time monitoring"}</h2>
-          <p>{compact ? "Last 15 minutes" : "Live sensor readings · demonstration data"}</p>
+          <p>{compact ? "Device sample history" : status?.valid ? "Live sensor readings from the ESP32" : "Waiting for live ESP32 readings"}</p>
         </div>
         {!compact && (
           <div className="range-select">
@@ -444,113 +454,116 @@ function MonitorChart({ compact = false }: { compact?: boolean }) {
       {!compact && (
         <div className="chart-legend">
           <button
-            onClick={() => setMetrics({ ...metrics, co2: !metrics.co2 })}
-            className={!metrics.co2 ? "muted" : ""}
+            onClick={() => setMetric("co2")}
+            className={metric !== "co2" ? "muted" : ""}
           >
             <i className="cyan" />
-            CO₂ <b>742 ppm</b>
+            CO₂ <b>{status?.valid ? `${status.co2} ppm` : "-- ppm"}</b>
           </button>
           <button
-            onClick={() => setMetrics({ ...metrics, temp: !metrics.temp })}
-            className={!metrics.temp ? "muted" : ""}
+            onClick={() => setMetric("temp")}
+            className={metric !== "temp" ? "muted" : ""}
           >
             <i className="amber" />
-            Temperature <b>27.4°C</b>
+            Temperature <b>{status?.valid ? `${status.temperature.toFixed(1)}°C` : "-- °C"}</b>
           </button>
           <button
-            onClick={() => setMetrics({ ...metrics, hum: !metrics.hum })}
-            className={!metrics.hum ? "muted" : ""}
+            onClick={() => setMetric("hum")}
+            className={metric !== "hum" ? "muted" : ""}
           >
             <i className="blue" />
-            Humidity <b>54%</b>
+            Humidity <b>{status?.valid ? `${status.humidity.toFixed(1)}%` : "-- %"}</b>
           </button>
         </div>
       )}
       <div className="chart-area">
         <div className="y-labels">
-          <span>1,200</span>
-          <span>900</span>
-          <span>600</span>
-          <span>300</span>
-          <span>0</span>
+          {[1, 0.75, 0.5, 0.25, 0].map((fraction) => <span key={fraction}>{(selectedMin + (selectedMax - selectedMin) * fraction).toFixed(metric === "co2" ? 0 : 1)} {unit}</span>)}
         </div>
         <div className="chart-grid">
-          {metrics.co2 && <Sparkline points={co2Points} color="#06b6d4" fill />}
-          {!compact && metrics.temp && <Sparkline points={tempPoints} color="#f59e0b" />}
-          {!compact && metrics.hum && <Sparkline points={humPoints} color="#3b82f6" />}
+          {selectedValues.length > 1 && <Sparkline points={selectedValues} color={selectedColor} fill />}
           <div className="chart-hover">
-            <span>10:39 AM</span>
-            <b>781 ppm</b>
+            <span>{chartSamples.length ? chartSamples[chartSamples.length - 1].epoch ? new Date(chartSamples[chartSamples.length - 1].epoch * 1000).toLocaleTimeString() : `Uptime ${chartSamples[chartSamples.length - 1].uptime}s` : "No samples"}</span>
+            <b>{status?.valid ? `${metric === "co2" ? status.co2 : metric === "temp" ? status.temperature.toFixed(1) : status.humidity.toFixed(1)} ${unit}` : "Sensor unavailable"}</b>
           </div>
         </div>
       </div>
       <div className="x-labels">
-        <span>10:28</span>
-        <span>10:31</span>
-        <span>10:34</span>
-        <span>10:37</span>
-        <span>10:40</span>
+        {[0, 0.25, 0.5, 0.75, 1].map((fraction) => {
+          const sample = chartSamples[Math.min(chartSamples.length - 1, Math.floor((chartSamples.length - 1) * fraction))];
+          return <span key={fraction}>{sample ? sample.epoch ? new Date(sample.epoch * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : `${Math.floor(sample.uptime / 60)}m` : "--"}</span>;
+        })}
         <span>Now</span>
       </div>
     </section>
   );
 }
 
-function Overview() {
+function Overview({ onConnectionClick }: { onConnectionClick: () => void }) {
+  const { status, error, samples } = useAirWatch();
+  const updated = status?.valid ? `${Math.max(0, status.uptimeSeconds - Math.floor(status.lastReadingUptime / 1000))} sec ago` : "No sensor reading";
   return (
     <>
       <div className="demo-banner">
         <Icon name="info" size={17} />
         <div>
-          <b>Preview mode</b>
+            <b>{status ? "Live device" : "Device offline"}</b>
           <span>
-            Showing realistic demonstration data. Connect an AirWatch device to display live
-            readings.
+            {error || (status?.valid ? "Showing sensor readings received from the ESP32." : "Waiting for a valid SCD41 reading.")}
           </span>
         </div>
-        <button>Learn about connection</button>
+        <button onClick={onConnectionClick}>Open connection settings</button>
       </div>
       <div className="section-intro">
         <div>
           <span className="eyebrow">Environment overview</span>
           <h1>
-            Your indoor air is <em>excellent</em>
+            Your indoor air is <em>{status?.valid ? status.quality.toLowerCase() : "waiting"}</em>
           </h1>
-          <p>All monitored conditions are within comfortable ranges.</p>
+          <p>{status?.valid ? `Current classification: ${status.quality}.` : "No valid sensor readings are available."}</p>
         </div>
         <div className="air-score">
           <span>Air score</span>
-          <strong>94</strong>
-          <small>/ 100</small>
+          <strong>{status?.valid ? status.quality : "--"}</strong>
+          <small>sensor quality</small>
         </div>
       </div>
       <div className="metric-grid">
         <MetricCard
           type="co2"
           title="CO₂ concentration"
-          value="742"
+          value={status?.valid ? String(status.co2) : "--"}
           unit="ppm"
           note=""
           color="#22c55e"
           icon="air"
+          points={samples.slice(-20).map((sample) => sample.co2)}
+          quality={status?.valid ? status.quality : "Waiting"}
+          updated={updated}
         />
         <MetricCard
           type="temp"
           title="Temperature"
-          value="27.4"
+          value={status?.valid ? status.temperature.toFixed(1) : "--"}
           unit="°C"
           note="Comfortable"
           color="#f59e0b"
           icon="thermo"
+          points={samples.slice(-20).map((sample) => sample.temp)}
+          quality={status?.valid ? status.quality : "Waiting"}
+          updated={updated}
         />
         <MetricCard
           type="humidity"
           title="Relative humidity"
-          value="54"
+          value={status?.valid ? status.humidity.toFixed(1) : "--"}
           unit="%"
           note="Optimal range"
           color="#3b82f6"
           icon="drop"
+          points={samples.slice(-20).map((sample) => sample.hum)}
+          quality={status?.valid ? status.quality : "Waiting"}
+          updated={updated}
         />
       </div>
       <div className="overview-lower">
@@ -559,7 +572,7 @@ function Overview() {
           <div className="panel-title-row">
             <div>
               <h2>System health</h2>
-              <p>AirWatch-S3 · Online</p>
+              <p>ESP32-S3 · {status ? "Online" : "Offline"}</p>
             </div>
             <span className="health-check">
               <Icon name="check" size={18} />
@@ -572,9 +585,9 @@ function Overview() {
               </span>
               <p>
                 <b>SCD41 sensor</b>
-                <small>Reading normally</small>
+                <small>{status?.valid ? "Reading normally" : "No sensor reading"}</small>
               </p>
-              <StatusDot label="Active" />
+              <StatusDot online={!!status?.valid} label={status?.valid ? "Active" : "Unavailable"} />
             </div>
             <div>
               <span className="health-icon">
@@ -582,9 +595,9 @@ function Overview() {
               </span>
               <p>
                 <b>Cooling fan</b>
-                <small>Automatic · 30°C</small>
+                <small>{status ? `Mode · ${status.fanMode}` : "State unavailable"}</small>
               </p>
-              <span className="neutral-tag">Standby</span>
+              <span className="neutral-tag">{status ? status.fanOn ? "On" : "Off" : "Unknown"}</span>
             </div>
             <div>
               <span className="health-icon">
@@ -592,9 +605,9 @@ function Overview() {
               </span>
               <p>
                 <b>Alert buzzer</b>
-                <small>Threshold · 2,000 ppm</small>
+                <small>{status?.alarmActive ? "Alarm active" : "No active alarm"}</small>
               </p>
-              <span className="neutral-tag">Armed</span>
+              <span className="neutral-tag">{status ? status.muted ? "Muted" : "Enabled" : "Unknown"}</span>
             </div>
             <div>
               <span className="health-icon">
@@ -602,7 +615,7 @@ function Overview() {
               </span>
               <p>
                 <b>Status light</b>
-                <small>Showing excellent</small>
+                <small>{status?.valid ? `Showing ${status.quality.toLowerCase()}` : "Waiting for sensor"}</small>
               </p>
               <i className="led-dot" />
             </div>
@@ -649,15 +662,17 @@ function Overview() {
 }
 
 function HistoryPage() {
+  const { samples } = useAirWatch();
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"table" | "chart">("table");
-  const filtered = historyRows.filter((r) =>
+  const rows = samples.slice().reverse().map((s) => [s.epoch ? new Date(s.epoch * 1000).toLocaleString() : `Uptime ${Math.floor(s.uptime / 60)}m ${s.uptime % 60}s`, s.co2, s.temp, s.hum, s.co2 < 800 ? "Excellent" : s.co2 < 1200 ? "Good" : s.co2 < 2000 ? "Poor" : "Unhealthy"] as (string | number)[]);
+  const filtered = rows.filter((r) =>
     r.join(" ").toLowerCase().includes(query.toLowerCase()),
   );
   const download = () => {
     const csv = [
       "Timestamp,CO2 ppm,Temperature C,Humidity %,Classification",
-      ...historyRows.map((r) => r.join(",")),
+      ...rows.map((r) => r.join(",")),
     ].join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
@@ -750,7 +765,7 @@ function HistoryPage() {
         )}
         <div className="table-footer">
           <span>
-            Showing {filtered.length} of {historyRows.length} readings
+            Showing {filtered.length} of {rows.length} readings
           </span>
           <span>Session started today at 9:14 AM</span>
         </div>
@@ -808,289 +823,54 @@ function SettingRow({
 }
 
 function ControlsPage({ toast }: { toast: (text: string) => void }) {
-  const [monitoring, setMonitoring] = useState(true);
-  const [fanMode, setFanMode] = useState("Automatic");
-  const [buzzer, setBuzzer] = useState(true);
-  const [led, setLed] = useState(true);
-  const command = (fn: () => void, message: string) => {
-    toast("Sending command to AirWatch…");
-    setTimeout(() => {
-      fn();
-      toast(message);
-    }, 700);
+  const { status, refresh, error, accessKey: deviceKey, setAccessKey: setDeviceKey } = useAirWatch();
+  const [controlError, setControlError] = useState("");
+  const [pending, setPending] = useState(false);
+  const command = async (action: "auto" | "on" | "off" | "mute" | "unmute") => {
+    if (!deviceKey.trim()) { setControlError("Enter the device access key shown on TFT Page 3."); return; }
+    setPending(true); setControlError("");
+    try {
+      if (action === "mute" || action === "unmute") await setBuzzerMuted(action === "mute", deviceKey.trim());
+      else await setFanMode(action, deviceKey.trim());
+      await refresh(); toast("AirWatch confirmed the command");
+    } catch (e) { setControlError(e instanceof Error ? e.message : "Command failed"); if (e instanceof Error && (e.message.includes("403") || e.message.includes("Incorrect device access key"))) setDeviceKey(""); }
+    finally { setPending(false); }
   };
-  return (
-    <div className="page-stack">
-      <PageHeading
-        eyebrow="Remote management"
-        title="Device controls"
-        description="Commands change state only after confirmation from the connected ESP32."
-        action={<StatusDot label="Device ready" />}
-      />
-      <div className="control-grid">
-        <section className="panel control-card">
-          <div className="control-card-head">
-            <span className="control-main-icon">
-              <Icon name="power" />
-            </span>
-            <div>
-              <h2>Monitoring system</h2>
-              <p>Sensor acquisition and web interface</p>
-            </div>
-            <Toggle
-              checked={monitoring}
-              onChange={() =>
-                command(
-                  () => setMonitoring(!monitoring),
-                  `Monitoring ${!monitoring ? "enabled" : "disabled"}`,
-                )
-              }
-              label="Toggle monitoring"
-            />
-          </div>
-          <div className="control-status">
-            <StatusDot
-              online={monitoring}
-              label={monitoring ? "System operational" : "System paused"}
-            />
-            <span>Uptime 01d 04h 28m</span>
-          </div>
-        </section>
-        <section className="panel control-card">
-          <div className="control-card-head">
-            <span className="control-main-icon amber-bg">
-              <Icon name="fan" />
-            </span>
-            <div>
-              <h2>Cooling fan</h2>
-              <p>
-                Current status: <b>Standby</b>
-              </p>
-            </div>
-            <span className="neutral-tag">27.4°C</span>
-          </div>
-          <div className="segmented">
-            {["Automatic", "Manual on", "Manual off"].map((mode) => (
-              <button
-                key={mode}
-                onClick={() => command(() => setFanMode(mode), `Fan mode confirmed: ${mode}`)}
-                className={fanMode === mode ? "active" : ""}
-              >
-                {mode}
-              </button>
-            ))}
-          </div>
-          <div className="thresholds">
-            <label>
-              Turn on at{" "}
-              <span>
-                <input type="number" defaultValue="30" />
-                °C
-              </span>
-            </label>
-            <label>
-              Turn off at{" "}
-              <span>
-                <input type="number" defaultValue="28" />
-                °C
-              </span>
-            </label>
-          </div>
-        </section>
-        <section className="panel control-card">
-          <div className="control-card-head">
-            <span className="control-main-icon red-bg">
-              <Icon name="volume" />
-            </span>
-            <div>
-              <h2>Audible warning</h2>
-              <p>CO₂ threshold alarm</p>
-            </div>
-            <Toggle
-              checked={buzzer}
-              onChange={() =>
-                command(
-                  () => setBuzzer(!buzzer),
-                  `Audible warnings ${!buzzer ? "enabled" : "muted"}`,
-                )
-              }
-              label="Toggle buzzer"
-            />
-          </div>
-          <div className="thresholds">
-            <label>
-              Activate at{" "}
-              <span>
-                <input type="number" defaultValue="2000" />
-                ppm
-              </span>
-            </label>
-            <label>
-              Clear below{" "}
-              <span>
-                <input type="number" defaultValue="1800" />
-                ppm
-              </span>
-            </label>
-          </div>
-          <button
-            className="secondary-btn wide"
-            onClick={() => toast("No active alarm to acknowledge")}
-          >
-            <Icon name="check" size={17} />
-            Acknowledge active alarm
-          </button>
-        </section>
-        <section className="panel control-card">
-          <div className="control-card-head">
-            <span className="control-main-icon green-bg">
-              <Icon name="light" />
-            </span>
-            <div>
-              <h2>NeoPixel indicator</h2>
-              <p>Air-quality status light</p>
-            </div>
-            <Toggle
-              checked={led}
-              onChange={() =>
-                command(() => setLed(!led), `Status light ${!led ? "enabled" : "disabled"}`)
-              }
-              label="Toggle LED"
-            />
-          </div>
-          <div className="color-preview">
-            <span className="big-led" />
-            <div>
-              <b>Excellent air quality</b>
-              <span>Current output · Emerald green</span>
-            </div>
-          </div>
-        </section>
-      </div>
+  return <div className="page-stack">
+    <PageHeading eyebrow="Remote management" title="Device controls" description="Fan and buzzer commands require confirmation from the connected ESP32." action={<StatusDot online={!!status} label={status ? "Device online" : "Device offline"} />} />
+    <section className="panel settings-card">
+      <label>Device access key (shown on TFT Page 3)<input type="password" autoComplete="off" value={deviceKey} onChange={(e) => setDeviceKey(e.target.value)} /></label>
+      {(error || controlError) && <p role="alert">{controlError || error}</p>}
+    </section>
+    <div className="control-grid">
+      <section className="panel control-card"><div className="control-card-head"><span className="control-main-icon"><Icon name="power" /></span><div><h2>Monitoring system</h2><p>System power state reported by device</p></div></div><div className="control-status"><StatusDot online={!!status?.systemOn} label={status?.systemOn ? "System operational" : "Unavailable or off"} /><span>{status ? `Uptime ${Math.floor(status.uptimeSeconds / 3600)}h ${Math.floor(status.uptimeSeconds % 3600 / 60)}m` : "Uptime unavailable"}</span></div></section>
+      <section className="panel control-card"><div className="control-card-head"><span className="control-main-icon amber-bg"><Icon name="fan" /></span><div><h2>Cooling fan</h2><p>Current status: <b>{status ? status.fanOn ? "On" : "Off" : "Unavailable"}</b></p></div><span className="neutral-tag">{status?.valid ? `${status.temperature.toFixed(1)} C` : "--"}</span></div><div className="segmented">{([["Automatic", "auto"], ["Manual on", "on"], ["Manual off", "off"]] as const).map(([label, mode]) => <button key={mode} disabled={pending || !status} onClick={() => void command(mode)} className={status?.fanMode === mode ? "active" : ""}>{label}</button>)}</div><p>Fan mode: {status?.fanMode ?? "unknown"}</p></section>
+      <section className="panel control-card"><div className="control-card-head"><span className="control-main-icon red-bg"><Icon name="volume" /></span><div><h2>Audible warning</h2><p>{status?.alarmActive ? "Alarm active" : "CO2 threshold alarm"}</p></div><Toggle checked={!!status && !status.muted} onChange={() => void command(status?.muted ? "unmute" : "mute")} label="Toggle buzzer" /></div><p>{status ? status.muted ? "Buzzer muted" : "Buzzer enabled" : "Buzzer state unavailable"}</p></section>
+      <section className="panel control-card"><div className="control-card-head"><span className="control-main-icon green-bg"><Icon name="light" /></span><div><h2>NeoPixel indicator</h2><p>Air-quality status light</p></div></div><div className="color-preview"><span className="big-led" /><div><b>{status?.valid ? status.quality : "Waiting for sensor"}</b><span>Indicator behavior is automatic</span></div></div></section>
     </div>
-  );
+  </div>;
 }
-
 function WifiPage({ toast, qrUrl }: { toast: (text: string) => void; qrUrl: string }) {
+  const { status, error, refresh, accessKey: key, setAccessKey: setKey } = useAirWatch();
+  const [ssid, setSSID] = useState(""); const [password, setPassword] = useState(""); const [message, setMessage] = useState(""); const [saving, setSaving] = useState(false);
   const address = window.location.origin;
-  return (
-    <div className="page-stack">
-      <PageHeading
-        eyebrow="Local network"
-        title="Wi-Fi & connectivity"
-        description="Manage local access to your AirWatch monitoring device."
-        action={
-          <button
-            className="secondary-btn"
-            onClick={() => {
-              toast("Reconnecting to local network…");
-              setTimeout(() => toast("Network connection confirmed"), 800);
-            }}
-          >
-            <Icon name="refresh" size={17} />
-            Reconnect
-          </button>
-        }
-      />
-      <div className="wifi-layout">
-        <div className="wifi-main">
-          <section className="panel network-hero">
-            <div className="signal-orb">
-              <Icon name="wifi" size={32} />
-            </div>
-            <div>
-              <span className="eyebrow">Connection status</span>
-              <h2>Connected to AirWatch Lab</h2>
-              <p>Strong signal · Local network access</p>
-            </div>
-            <StatusDot label="Online" />
-          </section>
-          <section className="panel network-details">
-            <h2>Network details</h2>
-            <div className="detail-grid">
-              <div>
-                <span>Network name (SSID)</span>
-                <b>AirWatch Lab</b>
-              </div>
-              <div>
-                <span>Local IP address</span>
-                <b>{window.location.hostname}</b>
-              </div>
-              <div>
-                <span>Signal strength</span>
-                <b className="signal-value">
-                  <Icon name="signal" size={17} />
-                  −42 dBm
-                </b>
-              </div>
-              <div>
-                <span>Device hostname</span>
-                <b>airwatch.local</b>
-              </div>
-              <div>
-                <span>Access Point mode</span>
-                <b>Available on fallback</b>
-              </div>
-              <div>
-                <span>Setup network</span>
-                <b>AirWatch-Setup</b>
-              </div>
-            </div>
-          </section>
-          <section className="panel setup-steps">
-            <h2>First-time setup</h2>
-            <p>
-              If AirWatch cannot join your network, it starts its own secure setup access point.
-            </p>
-            <ol>
-              <li>
-                <i>1</i>
-                <span>
-                  <b>Join the setup network</b>Open Wi-Fi settings and connect to{" "}
-                  <code>AirWatch-Setup</code>.
-                </span>
-              </li>
-              <li>
-                <i>2</i>
-                <span>
-                  <b>Open the setup portal</b>Visit <code>http://192.168.4.1</code> in your browser.
-                </span>
-              </li>
-              <li>
-                <i>3</i>
-                <span>
-                  <b>Choose your Wi-Fi</b>Enter network credentials and wait for AirWatch to
-                  reconnect.
-                </span>
-              </li>
-            </ol>
-          </section>
-        </div>
-        <aside className="panel qr-card">
-          <span className="eyebrow">Quick access</span>
-          <h2>Open this dashboard</h2>
-          <p>
-            Connect your smartphone to the same network as your AirWatch device, then scan the QR
-            code to access your monitoring dashboard.
-          </p>
-          <div className="qr-frame">
-            {qrUrl ? (
-              <img src={qrUrl} alt={`QR code for ${address}`} />
-            ) : (
-              <div className="qr-loading">Generating…</div>
-            )}
-          </div>
-          <div className="url-chip">
-            <Icon name="shield" size={16} />
-            <span>{address}</span>
-          </div>
-          <small>Generated from the device’s current reachable address.</small>
-        </aside>
-      </div>
-    </div>
-  );
+  const saveNetwork = async (event: FormEvent) => {
+    event.preventDefault(); setMessage("");
+    if (!key.trim()) { setMessage("Enter the access key shown on TFT Page 3."); return; }
+    setSaving(true);
+    try { await saveWiFiCredentials(ssid.trim(), password, key.trim()); setPassword(""); setMessage("Credentials accepted. The device is attempting to join this 2.4 GHz network."); toast("Wi-Fi credentials sent to AirWatch"); window.setTimeout(() => void refresh(), 3000); }
+    catch (e) { setMessage(e instanceof Error ? e.message : "Could not configure Wi-Fi"); if (e instanceof Error && e.message.includes("Incorrect device access key")) setKey(""); }
+    finally { setSaving(false); }
+  };
+  return <div className="page-stack">
+    <PageHeading eyebrow="Local network" title="Wi-Fi & connectivity" description="Device network status and 2.4 GHz network setup." action={<button className="secondary-btn" onClick={() => void refresh()}><Icon name="refresh" size={17} />Reconnect</button>} />
+    <div className="wifi-layout"><div className="wifi-main">
+      <section className="panel network-hero"><div className="signal-orb"><Icon name="wifi" size={32} /></div><div><span className="eyebrow">Connection status</span><h2>{status?.wifi.connected ? `Connected to ${status.wifi.ssid}` : "Router disconnected"}</h2><p>{status?.wifi.connected ? `Device IP ${status.wifi.ip}` : error || "Check device or connect to its setup access point"}</p></div><StatusDot online={!!status} label={status ? status.wifi.connected ? "Online" : "Setup mode" : "Offline"} /></section>
+      <section className="panel network-details"><h2>Network details</h2><div className="detail-grid"><div><span>Router SSID</span><b>{status?.wifi.ssid || "Not connected"}</b></div><div><span>Device IP address</span><b>{status?.wifi.ip || "—"}</b></div><div><span>Setup access point</span><b>{status?.wifi.apSSID || "Unavailable"}</b></div><div><span>Setup AP address</span><b>{status?.wifi.apIP || "192.168.4.1"}</b></div><div><span>Dashboard address</span><b>{address}</b></div><div><span>Sensor</span><b>{status?.valid ? "SCD41 available" : "Waiting for SCD41"}</b></div></div></section>
+      <section className="panel setup-steps"><h2>Configure Wi-Fi</h2><p>The device supports 2.4 GHz Wi-Fi. If it is offline, connect your browser to its setup access point first.</p><form onSubmit={saveNetwork} className="wifi-form"><label>AirWatch access key<input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} required /></label><label>Network name (SSID)<input value={ssid} onChange={(e) => setSSID(e.target.value)} maxLength={32} required /></label><label>Network password<input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} maxLength={63} /></label><button className="secondary-btn" type="submit" disabled={saving}>{saving ? "Sending…" : "Save Wi-Fi credentials"}</button>{message && <p role="status">{message}</p>}</form></section>
+    </div><aside className="panel qr-card"><span className="eyebrow">Quick access</span><h2>Open this dashboard</h2><p>Scan while connected to the same network as the device.</p><div className="qr-frame">{qrUrl ? <img src={qrUrl} alt={`QR code for ${address}`} /> : <div className="qr-loading">Generating…</div>}</div><div className="url-chip"><Icon name="shield" size={16} /><span>{address}</span></div><small>For device-served offline use, this URL is the ESP32 address.</small></aside></div>
+  </div>;
 }
-
 function SettingsPage() {
   const [darkAuto, setDarkAuto] = useState(false),
     [sounds, setSounds] = useState(true),
@@ -1198,8 +978,21 @@ function AboutPage() {
 }
 
 function MobileApp({ onExit }: { onExit: () => void }) {
+  const { status, accessKey, setAccessKey, refresh } = useAirWatch();
   const [tab, setTab] = useState("Home");
-  const [fan, setFan] = useState("Auto");
+  const [controlError, setControlError] = useState("");
+  const setFan = async (mode: "auto" | "on" | "off") => {
+    let key = accessKey;
+    if (!key) { key = window.prompt("Enter the AirWatch access key shown on TFT Page 3") || ""; if (!key) return; setAccessKey(key); }
+    try { await setFanMode(mode, key); await refresh(); setControlError(""); }
+    catch (e) { setControlError(e instanceof Error ? e.message : "Fan command failed"); }
+  };
+  const setMute = async (muted: boolean) => {
+    let key = accessKey;
+    if (!key) { key = window.prompt("Enter the AirWatch access key shown on TFT Page 3") || ""; if (!key) return; setAccessKey(key); }
+    try { await setBuzzerMuted(muted, key); await refresh(); setControlError(""); }
+    catch (e) { setControlError(e instanceof Error ? e.message : "Buzzer command failed"); }
+  };
   return (
     <div className="showcase-screen">
       <div className="showcase-top">
@@ -1223,8 +1016,8 @@ function MobileApp({ onExit }: { onExit: () => void }) {
             <div className="mobile-head">
               <Logo compact />
               <div>
-                <b>AirWatch Lab</b>
-                <StatusDot label="Connected" />
+                <b>AirWatch Device</b>
+                <StatusDot online={!!status} label={status ? "Connected" : "Offline"} />
               </div>
               <button>
                 <Icon name="bell" size={20} />
@@ -1234,21 +1027,21 @@ function MobileApp({ onExit }: { onExit: () => void }) {
               <div className="mobile-scroll">
                 <div className="mobile-greeting">
                   <span>Good morning</span>
-                  <h2>Your air looks excellent.</h2>
+                  <h2>{status?.valid ? `Your air looks ${status.quality.toLowerCase()}.` : "Waiting for sensor readings."}</h2>
                 </div>
                 <div className="mobile-co2">
                   <div className="mobile-score-ring">
                     <span>
-                      <b>742</b>ppm
+                      <b>{status?.valid ? status.co2 : "--"}</b>ppm
                     </span>
                   </div>
                   <div>
                     <span className="quality-tag">
                       <i />
-                      Excellent
+                      {status?.valid ? status.quality : "Waiting"}
                     </span>
                     <p>CO₂ concentration</p>
-                    <small>Updated just now</small>
+                    <small>{status?.valid ? "Live device reading" : "No sensor reading"}</small>
                   </div>
                 </div>
                 <div className="mobile-minis">
@@ -1258,9 +1051,9 @@ function MobileApp({ onExit }: { onExit: () => void }) {
                       Temperature
                     </span>
                     <b>
-                      27.4<small>°C</small>
+                      {status?.valid ? status.temperature.toFixed(1) : "--"}<small>°C</small>
                     </b>
-                    <em>Comfortable</em>
+                    <em>{status?.valid ? "Live reading" : "Unavailable"}</em>
                   </div>
                   <div>
                     <span>
@@ -1268,9 +1061,9 @@ function MobileApp({ onExit }: { onExit: () => void }) {
                       Humidity
                     </span>
                     <b>
-                      54<small>%</small>
+                      {status?.valid ? status.humidity.toFixed(1) : "--"}<small>%</small>
                     </b>
-                    <em>Optimal range</em>
+                    <em>{status?.valid ? "Live reading" : "Unavailable"}</em>
                   </div>
                 </div>
                 <MonitorChart compact />
@@ -1281,14 +1074,14 @@ function MobileApp({ onExit }: { onExit: () => void }) {
                       <Icon name="fan" />
                       Cooling fan
                     </span>
-                    <b>Automatic</b>
+                    <b>{status?.fanMode || "Unknown"}</b>
                   </div>
                   <div>
                     <span>
                       <Icon name="volume" />
                       Air alarm
                     </span>
-                    <b>Armed</b>
+                    <b>{status ? status.muted ? "Muted" : "Enabled" : "Unknown"}</b>
                   </div>
                 </div>
               </div>
@@ -1318,16 +1111,16 @@ function MobileApp({ onExit }: { onExit: () => void }) {
                   </span>
                   <div>
                     <b>Cooling fan</b>
-                    <small>Currently on standby</small>
+                    <small>{status ? status.fanOn ? "Currently on" : "Currently off" : "State unavailable"}</small>
                   </div>
                 </div>
                 <div className="segmented">
-                  {["Auto", "On", "Off"].map((x) => (
-                    <button onClick={() => setFan(x)} className={fan === x ? "active" : ""}>
-                      {x}
-                    </button>
-                  ))}
+                  {["Auto", "On", "Off"].map((x) => {
+                    const mode = x === "Auto" ? "auto" : x.toLowerCase() as "on" | "off";
+                    return <button key={x} disabled={!status} onClick={() => void setFan(mode)} className={status?.fanMode === mode ? "active" : ""}>{x}</button>;
+                  })}
                 </div>
+                {controlError && <p role="alert">{controlError}</p>}
                 <div className="mobile-control-card">
                   <span>
                     <Icon name="volume" />
@@ -1336,7 +1129,7 @@ function MobileApp({ onExit }: { onExit: () => void }) {
                     <b>Audible alerts</b>
                     <small>Alarm threshold: 2,000 ppm</small>
                   </div>
-                  <Toggle checked={true} onChange={() => {}} label="Alerts" />
+                  <Toggle checked={!!status && !status.muted} onChange={() => void setMute(!!status && !status.muted)} label="Alerts" />
                 </div>
                 <div className="mobile-control-card">
                   <span>
@@ -1344,9 +1137,8 @@ function MobileApp({ onExit }: { onExit: () => void }) {
                   </span>
                   <div>
                     <b>Status indicator</b>
-                    <small>Showing excellent</small>
+                    <small>{status?.valid ? `Showing ${status.quality.toLowerCase()}` : "Waiting for sensor"}</small>
                   </div>
-                  <Toggle checked={true} onChange={() => {}} label="LED" />
                 </div>
               </div>
             )}
@@ -1359,28 +1151,10 @@ function MobileApp({ onExit }: { onExit: () => void }) {
                   <span>
                     <Icon name="shield" size={28} />
                   </span>
-                  <b>All clear</b>
-                  <p>No active warnings on AirWatch Lab.</p>
+                  <b>{status?.alarmActive ? "Alarm active" : status ? "No active alarm" : "Device offline"}</b>
+                  <p>{status?.alarmActive ? "The device reports an active CO2 alarm." : "Alarm state is clear or unavailable."}</p>
                 </div>
-                <div className="event-list">
-                  <div>
-                    <i className="blue-event" />
-                    <span>
-                      <b>Device reconnected</b>
-                      <small>Today, 9:14 AM</small>
-                    </span>
-                  </div>
-                  <div>
-                    <i className="amber-event" />
-                    <span>
-                      <b>CO₂ returned to normal</b>
-                      <small>Yesterday, 4:42 PM</small>
-                    </span>
-                  </div>
-                </div>
-                <small className="push-note">
-                  Background push notifications are not enabled in this prototype.
-                </small>
+                <small className="push-note">Event history and background push notifications are not exposed by the ESP32 API.</small>
               </div>
             )}
           </div>
@@ -1427,8 +1201,7 @@ function MobileApp({ onExit }: { onExit: () => void }) {
           <div className="prototype-note">
             <Icon name="info" />
             <span>
-              <b>Prototype behavior</b>Data and device responses are simulated and clearly
-              identified until a live ESP32 API is configured.
+              <b>Live companion view</b>Measurements and supported hardware commands use the connected AirWatch device.
             </span>
           </div>
         </div>
@@ -1438,14 +1211,21 @@ function MobileApp({ onExit }: { onExit: () => void }) {
 }
 
 function DeviceUI({ onExit, qrUrl }: { onExit: () => void; qrUrl: string }) {
+  const { status } = useAirWatch();
   const [page, setPage] = useState(2);
+  const uptime = status?.uptimeSeconds ?? 0;
+  const deviceEpoch = status?.lastReadingEpoch && status.lastReadingUptime
+    ? status.lastReadingEpoch + Math.max(0, status.uptimeSeconds - status.lastReadingUptime / 1000)
+    : 0;
+  const deviceTime = deviceEpoch ? new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(deviceEpoch * 1000)) : "Syncing time";
+  const deviceDate = deviceEpoch ? new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", weekday: "long", month: "short", day: "numeric", year: "numeric" }).format(new Date(deviceEpoch * 1000)) : "Connect the device to Wi-Fi";
   return (
     <div className="showcase-screen device-showcase">
       <div className="showcase-top">
         <div>
           <span className="eyebrow">Physical interface</span>
           <h1>ILI9341 Touchscreen</h1>
-          <p>320 × 240 landscape layout with swipe navigation.</p>
+          <p>240 x 320 portrait layout with vertical swipe navigation.</p>
         </div>
         <button className="secondary-btn" onClick={onExit}>
           <Icon name="monitor" size={17} />
@@ -1460,25 +1240,25 @@ function DeviceUI({ onExit, qrUrl }: { onExit: () => void; qrUrl: string }) {
                 <header>
                   <Logo compact />
                   <b>AIRWATCH</b>
-                  <StatusDot label="LIVE" />
+                  <StatusDot online={!!status} label={status ? "LIVE" : "OFFLINE"} />
                 </header>
                 <div className="device-main-reading">
                   <span>CO₂</span>
-                  <b>742</b>
+                  <b>{status?.valid ? status.co2 : "--"}</b>
                   <small>PPM</small>
-                  <em>EXCELLENT</em>
+                  <em>{status?.valid ? status.quality : "WAITING"}</em>
                 </div>
                 <footer>
                   <div>
                     <Icon name="thermo" />
                     <span>
-                      <b>27.4°</b>TEMP
+                      <b>{status?.valid ? `${status.temperature.toFixed(1)}°` : "--"}</b>TEMP
                     </span>
                   </div>
                   <div>
                     <Icon name="drop" />
                     <span>
-                      <b>54%</b>HUMIDITY
+                      <b>{status?.valid ? `${status.humidity.toFixed(1)}%` : "--"}</b>HUMIDITY
                     </span>
                   </div>
                 </footer>
@@ -1488,29 +1268,29 @@ function DeviceUI({ onExit, qrUrl }: { onExit: () => void; qrUrl: string }) {
               <div className="device-page device-uptime">
                 <header>
                   <Logo compact />
-                  <b>SYSTEM UPTIME</b>
+                  <b>DEVICE UPTIME</b>
                 </header>
                 <div className="uptime-clock">
-                  <span>01</span>
+                  <span>{String(Math.floor(uptime / 3600)).padStart(2, "0")}</span>
                   <i>:</i>
-                  <span>04</span>
+                  <span>{String(Math.floor((uptime % 3600) / 60)).padStart(2, "0")}</span>
                   <i>:</i>
-                  <span>28</span>
+                  <span>{String(uptime % 60).padStart(2, "0")}</span>
                 </div>
                 <div className="uptime-labels">
-                  <span>DAYS</span>
                   <span>HOURS</span>
                   <span>MINUTES</span>
+                  <span>SECONDS</span>
                 </div>
-                <p>System operating normally</p>
-                <StatusDot label="ALL SYSTEMS ACTIVE" />
+                <p>{status?.systemOn ? "System operating normally" : "Device state unavailable"}</p>
+                <StatusDot online={!!status?.systemOn} label={status?.systemOn ? "SYSTEM ACTIVE" : "SYSTEM OFFLINE"} />
               </div>
             )}
             {page === 2 && (
               <div className="device-page device-qr">
                 <header>
                   <span>
-                    <Icon name="wifi" size={16} /> CONNECTED
+                    <Icon name="wifi" size={16} /> {status?.wifi.connected ? "CONNECTED" : "SETUP MODE"}
                   </span>
                   <b>AIRWATCH LAB</b>
                 </header>
@@ -1521,30 +1301,41 @@ function DeviceUI({ onExit, qrUrl }: { onExit: () => void; qrUrl: string }) {
                   <div>
                     <span>SCAN TO OPEN</span>
                     <b>DASHBOARD</b>
-                    <p>{window.location.hostname}</p>
+                    <p>{status?.wifi.ip || status?.wifi.apIP || window.location.hostname}</p>
                     <small>Same Wi-Fi required</small>
                   </div>
                 </div>
               </div>
             )}
-            <button className="screen-arrow left" onClick={() => setPage((page + 2) % 3)}>
+            {page === 3 && (
+              <div className="device-page device-time">
+                <header><Logo compact /><b>TIME &amp; DATE</b></header>
+                <div className="device-time-face">
+                  <span>PHILIPPINE TIME</span>
+                  <strong>{deviceTime}</strong>
+                  <b>{deviceDate}</b>
+                  <small>Asia/Manila · UTC+8</small>
+                </div>
+              </div>
+            )}
+            <button className="screen-arrow left" onClick={() => setPage((page + 3) % 4)}>
               ‹
             </button>
-            <button className="screen-arrow right" onClick={() => setPage((page + 1) % 3)}>
+            <button className="screen-arrow right" onClick={() => setPage((page + 1) % 4)}>
               ›
             </button>
             <div className="screen-dots">
-              {[0, 1, 2].map((x) => (
+              {[0, 1, 2, 3].map((x) => (
                 <i key={x} className={page === x ? "active" : ""} />
               ))}
             </div>
           </div>
         </div>
         <div className="device-copy">
-          <span className="eyebrow">Page {page + 1} of 3</span>
-          <h2>{["Live air quality", "Device uptime", "Wi-Fi & QR access"][page]}</h2>
+          <span className="eyebrow">Page {page + 1} of 4</span>
+          <h2>{["Live air quality", "Device uptime", "Wi-Fi & QR access", "Time & date"][page]}</h2>
           <p>Use the on-screen arrows to preview the swipe-left and swipe-right interaction.</p>
-          <div className="dimension-chip">320 px × 240 px · landscape</div>
+          <div className="dimension-chip">240 px x 320 px · portrait</div>
         </div>
       </div>
     </div>
@@ -1557,37 +1348,30 @@ function ApiPage() {
       <PageHeading
         eyebrow="Live data"
         title="Monitoring & API readiness"
-        description="Interactive live charts now; ESP32 REST integration when firmware is connected."
+        description="Live SCD41 measurements and sample history received from the ESP32."
       />
       <MonitorChart />
       <section className="panel api-panel">
         <div>
           <span className="eyebrow">Firmware contract</span>
           <h2>Local REST API</h2>
-          <p>Recommended endpoints and response fields for production integration.</p>
+            <p>Endpoints implemented by the supplied AirWatch v2.1 firmware.</p>
         </div>
         <div className="endpoint-list">
           <code>
             <b>GET</b> /api/status{" "}
-            <span>co2, temperature, humidity, classification, fan, buzzer, updatedAt</span>
+            <span>valid, co2, temperature, humidity, quality, fanMode, muted, wifi, uptime</span>
           </code>
-          <code>
-            <b>GET</b> /api/history <span>measurements[], sessionStartedAt, storageMode</span>
-          </code>
-          <code>
-            <b>GET</b> /api/network <span>connected, ssid, ip, rssi, hostname, apMode</span>
-          </code>
-          <code>
-            <b>POST</b> /api/control <span>commandId, target, action, value</span>
-          </code>
+          <code><b>GET</b> /api/history <span>samples[]: uptime, epoch, co2, temp, hum</span></code>
+          <code><b>POST</b> /api/control <span>fanMode: auto|on|off, muted: boolean</span></code>
+          <code><b>POST</b> /api/wifi <span>ssid, password</span></code>
         </div>
         <div className="api-note">
           <Icon name="shield" />
           <p>
             <b>Confirmation-first controls</b>
             <span>
-              POST commands remain pending until the ESP32 responds with <code>applied: true</code>{" "}
-              and the confirmed device state.
+              Control requests require <code>X-AirWatch-Key</code> and succeed only after the ESP32 returns <code>{"{\"ok\":true}"}</code>.
             </span>
           </p>
         </div>
@@ -1597,6 +1381,7 @@ function ApiPage() {
 }
 
 export default function App() {
+  const { status, lastSuccess } = useAirWatch();
   const [active, setActive] = useState("Overview");
   const [dark, setDark] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1680,14 +1465,14 @@ export default function App() {
               <Icon name="cpu" />
             </span>
             <p>
-              <b>AirWatch Lab</b>
+              <b>AirWatch Device</b>
               <small>
-                <i /> Demo connected
+                <i /> {status ? status.wifi.connected ? "Router connected" : "Setup access point" : "Disconnected"}
               </small>
             </p>
             <button>•••</button>
           </div>
-          <span>ESP32-S3 · 192.168.1.86</span>
+          <span>ESP32-S3 · {status?.wifi.ip || status?.wifi.apIP || "No device address"}</span>
         </div>
       </aside>
       {menuOpen && (
@@ -1713,10 +1498,7 @@ export default function App() {
               <Icon name="clock" size={17} />
               <span>{now}</span>
             </div>
-            <div className="last-sync">
-              <i />
-              Last update <b>8s ago</b>
-            </div>
+            <div className="last-sync"><i />{status ? <>Last response <b>{lastSuccess ? new Date(lastSuccess).toLocaleTimeString() : "just now"}</b></> : <b>Device offline</b>}</div>
             <button className="icon-button" onClick={() => notify("No new alerts")}>
               <Icon name="bell" />
               <i />
@@ -1728,7 +1510,7 @@ export default function App() {
           </div>
         </header>
         <main className="content">
-          {active === "Overview" && <Overview />}
+          {active === "Overview" && <Overview onConnectionClick={() => go("Wi-Fi & Connectivity")} />}
           {active === "Live Monitoring" && <ApiPage />}
           {active === "Historical Data" && <HistoryPage />}
           {active === "Device Controls" && <ControlsPage toast={notify} />}
@@ -1738,7 +1520,7 @@ export default function App() {
         </main>
         <footer className="site-footer">
           <span>AirWatch · Wireless Air Tracking & CO₂ Handling</span>
-          <span>Local-only monitoring · Preview data</span>
+          <span>Local-only monitoring · Live data when connected</span>
         </footer>
       </div>
       {toast && (

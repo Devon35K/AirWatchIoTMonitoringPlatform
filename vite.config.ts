@@ -12,7 +12,7 @@ export default defineConfig(({ mode }) => {
   const emitSourcemaps = mode === "development";
 
   return {
-    base: process.env.FIGMA_PUBLIC_URL ? `${process.env.FIGMA_PUBLIC_URL}/` : "/",
+    base: process.env.FIGMA_PUBLIC_URL ? `${process.env.FIGMA_PUBLIC_URL}/` : "./",
     build: {
       sourcemap: emitSourcemaps ? "inline" : false,
       minify: !emitSourcemaps,
@@ -35,6 +35,12 @@ export default defineConfig(({ mode }) => {
       host: process.env.FIGMA_DEV_SERVER_HOST || "0.0.0.0",
       port: parseInt(process.env.PORT || "8443"),
       strictPort: true,
+      proxy: {
+        "/api": {
+          target: process.env.AIRWATCH_DEVICE_URL || "http://192.168.4.1",
+          changeOrigin: true,
+        },
+      },
       watch: {
         ignored: ["**/.figma/**"],
       },

@@ -1,4 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
 @import "tailwindcss";
 
 @layer base {
@@ -52,6 +51,34 @@
   input:focus-visible {
     outline: 3px solid rgba(56, 189, 248, 0.3);
     outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .wifi-form,
+  .settings-card > label {
+    display: grid;
+    gap: 12px;
+  }
+  .wifi-form label,
+  .settings-card > label {
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .wifi-form input,
+  .settings-card > label input {
+    width: 100%;
+    min-height: 42px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 9px 12px;
+    background: var(--surface);
+    color: var(--text);
+  }
+  .wifi-form [role="status"],
+  .settings-card [role="alert"] {
+    color: var(--muted);
+    font-size: 13px;
   }
 }
 
@@ -2117,17 +2144,19 @@ td small {
     inset 0 1px rgba(255, 255, 255, 0.08);
 }
 .device-screen {
-  width: 640px;
-  height: 480px;
-  background: #06131e;
+  width: 480px;
+  height: 640px;
+  background: #f5f8fb;
   position: relative;
   overflow: hidden;
-  color: white;
+  color: #102a43;
 }
 .device-page {
   position: absolute;
   inset: 0;
   padding: 25px 30px;
+  width: 480px;
+  height: 640px;
 }
 .device-page header {
   display: flex;
@@ -2645,5 +2674,142 @@ td small {
   }
   .device-copy p {
     display: none;
+  }
+}
+
+/* The physical TFT is portrait 240 x 320; this preview renders it at 2x. */
+.device-screen {
+  width: 480px;
+  height: 640px;
+  background: #f5f8fb;
+  color: #102a43;
+}
+.device-page {
+  width: 480px;
+  height: 640px;
+  padding: 25px 30px;
+}
+.device-main-reading {
+  margin: 48px 4px 0;
+  padding: 24px 12px 20px;
+  border: 1px solid #e6edf3;
+  border-radius: 16px;
+  background: #fff;
+}
+.device-main-reading > b {
+  display: block;
+  margin: 9px 0 0;
+  font-size: 82px;
+  letter-spacing: -3px;
+  color: #102a43;
+}
+.device-main-reading > span,
+.device-main-reading > small,
+.device-live footer span {
+  color: #687b8d;
+}
+.device-live footer {
+  left: 30px;
+  right: 30px;
+  gap: 12px;
+}
+.device-live footer > div {
+  padding: 16px 8px;
+  border: 1px solid #e6edf3;
+  border-radius: 12px;
+  background: #fff;
+}
+.device-live footer > div:last-child {
+  border: 1px solid #e6edf3;
+}
+.device-live footer b {
+  color: #102a43;
+}
+.device-uptime {
+  background: #f5f8fb;
+}
+.uptime-clock {
+  gap: 12px;
+  margin-top: 145px;
+}
+.uptime-clock span {
+  padding: 8px 12px;
+  background: #fff;
+  border-color: #e6edf3;
+  color: #102a43;
+  font-size: 48px;
+}
+.uptime-clock i {
+  color: #06b6d4;
+}
+.uptime-labels {
+  gap: 32px;
+  color: #687b8d;
+}
+.device-uptime p {
+  color: #687b8d;
+}
+.device-uptime .status-pill {
+  color: #15803d;
+  background: rgba(34, 197, 94, 0.12);
+}
+.device-qr header {
+  color: #687b8d;
+}
+.device-qr header span,
+.device-qr-body span {
+  color: #0e7490;
+}
+.device-qr-body {
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 62px;
+}
+.device-qr-box {
+  width: 220px;
+  height: 220px;
+}
+.device-qr-body > div:last-child {
+  width: 100%;
+  text-align: center;
+}
+.device-qr-body b {
+  margin-bottom: 9px;
+  font-size: 21px;
+}
+.device-qr-body p {
+  color: #102a43;
+  background: #f8fafc;
+  border: 1px solid #e6edf3;
+}
+.device-qr-body small {
+  color: #687b8d;
+}
+@media (max-width: 1100px) {
+  .device-screen {
+    width: 360px;
+    height: 480px;
+  }
+  .device-page {
+    width: 480px;
+    height: 640px;
+    transform: scale(0.75);
+    transform-origin: top left;
+  }
+}
+@media (max-width: 600px) {
+  .device-shell {
+    padding: 10px 12px;
+  }
+  .device-screen {
+    width: 240px;
+    height: 320px;
+    max-width: calc(100vw - 48px);
+  }
+  .device-page {
+    width: 480px;
+    height: 640px;
+    transform: scale(0.5);
+    transform-origin: top left;
   }
 }
