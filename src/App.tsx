@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import QRCode from "qrcode";
 import { useAirWatch } from "./hooks/useAirWatch";
-import { saveWiFiCredentials, setBuzzerMuted, setFanMode } from "./services/airwatchApi";
+import { saveWiFiCredentials, setBuzzerMuted, setDisplayTheme, setFanMode } from "./services/airwatchApi";
 
 type IconName =
   | "air"
@@ -1363,7 +1363,7 @@ function ApiPage() {
             <span>valid, co2, temperature, humidity, quality, fanMode, muted, wifi, uptime</span>
           </code>
           <code><b>GET</b> /api/history <span>samples[]: uptime, epoch, co2, temp, hum</span></code>
-          <code><b>POST</b> /api/control <span>fanMode: auto|on|off, muted: boolean</span></code>
+          <code><b>POST</b> /api/control <span>fanMode, muted, displayTheme: light|dark</span></code>
           <code><b>POST</b> /api/wifi <span>ssid, password</span></code>
         </div>
         <div className="api-note">
@@ -1381,12 +1381,13 @@ function ApiPage() {
 }
 
 export default function App() {
-  const { status, lastSuccess } = useAirWatch();
+  const { status, lastSuccess, accessKey, setAccessKey, refresh } = useAirWatch();
   const [active, setActive] = useState("Overview");
   const [dark, setDark] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [showcase, setShowcase] = useState<"web" | "mobile" | "device">("web");
   const [toast, setToast] = useState("");
+  const [themePending, setThemePending] = useState(false);
   const [qrUrl, setQrUrl] = useState("");
   const now = useMemo(
     () =>
@@ -1403,6 +1404,9 @@ export default function App() {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
   useEffect(() => {
+    if (status?.displayTheme) setDark(status.displayTheme === "dark");
+  }, [status?.displayTheme]);
+  useEffect(() => {
     QRCode.toDataURL(window.location.origin, {
       width: 360,
       margin: 1,
@@ -1412,6 +1416,30 @@ export default function App() {
   const notify = (text: string) => {
     setToast(text);
     setTimeout(() => setToast(""), 2400);
+  };
+  const toggleTheme = async () => {
+    const nextTheme = dark ? "light" : "dark";
+    setDark(nextTheme === "dark");
+    let key = accessKey.trim();
+    if (!key) {
+      key = window.prompt("Enter the AirWatch control key shown on the TFT Network page")?.trim() ?? "";
+      if (!key) {
+        notify(`Website changed to ${nextTheme}; enter the device key to sync the TFT`);
+        return;
+      }
+      setAccessKey(key);
+    }
+    setThemePending(true);
+    try {
+      await setDisplayTheme(nextTheme, key);
+      await refresh();
+      notify(`Website and TFT switched to ${nextTheme} mode`);
+    } catch (error) {
+      if (error instanceof Error && error.message.toLowerCase().includes("unauthorized")) setAccessKey("");
+      notify(`Website changed to ${nextTheme}, but TFT sync failed: ${error instanceof Error ? error.message : "device unavailable"}`);
+    } finally {
+      setThemePending(false);
+    }
   };
   if (showcase === "mobile") return <MobileApp onExit={() => setShowcase("web")} />;
   if (showcase === "device") return <DeviceUI onExit={() => setShowcase("web")} qrUrl={qrUrl} />;
@@ -1503,7 +1531,7 @@ export default function App() {
               <Icon name="bell" />
               <i />
             </button>
-            <button className="theme-button" onClick={() => setDark(!dark)}>
+            <button className="theme-button" onClick={() => void toggleTheme()} disabled={themePending}>
               <Icon name={dark ? "sun" : "moon"} />
               <span>{dark ? "Light" : "Dark"} mode</span>
             </button>

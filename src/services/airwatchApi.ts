@@ -1,5 +1,8 @@
+import { apiErrorMessage, normalizeApiError, parseDeviceStatus, parseMutationResult, parseSensorHistory } from "./airwatchContract.js";
+
 export interface DeviceStatus {
   valid: boolean; co2: number; temperature: number; humidity: number; quality: string;
+  displayTheme: "light" | "dark";
   fanOn: boolean; fanMode: "auto" | "on" | "off"; muted: boolean; alarmActive: boolean;
   systemOn: boolean; uptimeSeconds: number; lastReadingUptime: number; lastReadingEpoch: number;
   wifi: { connected: boolean; ssid: string; ip: string; apSSID: string; apIP: string };
@@ -16,13 +19,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      throw new Error(data.error || `AirWatch request failed (${response.status})`);
+      throw new Error(apiErrorMessage(data, response.status));
     }
-    return await response.json() as T;
+    const data: unknown = await response.json();
+    if (path === "/api/status") return parseDeviceStatus(data) as T;
+    if (path === "/api/history") return parseSensorHistory(data) as T;
+    if (path === "/api/control" || path === "/api/wifi") return parseMutationResult(data) as T;
+    return data as T;
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw new Error("AirWatch request timed out");
-    if (error instanceof TypeError) throw new Error("Cannot reach AirWatch device");
-    throw error;
+    throw normalizeApiError(error);
   } finally { window.clearTimeout(timer); }
 }
 export const getDeviceStatus = () => request<DeviceStatus>("/api/status", { cache: "no-store" });
@@ -32,5 +37,6 @@ async function control(body: object, key: string) {
 }
 export const setFanMode = (fanMode: DeviceStatus["fanMode"], key: string) => control({ fanMode }, key);
 export const setBuzzerMuted = (muted: boolean, key: string) => control({ muted }, key);
+export const setDisplayTheme = (displayTheme: DeviceStatus["displayTheme"], key: string) => control({ displayTheme }, key);
 export const saveWiFiCredentials = (ssid: string, password: string, key: string) =>
   request<{ ok: boolean }>("/api/wifi", { method: "POST", headers: { "Content-Type": "application/json", "X-AirWatch-Key": key }, body: JSON.stringify({ ssid, password }) });

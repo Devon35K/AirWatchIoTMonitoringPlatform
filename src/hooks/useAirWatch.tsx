@@ -12,7 +12,16 @@ function useAirWatchPolling() {
       setStatus(nextStatus); setSamples(history.samples ?? []); setLastSuccess(Date.now()); setError("");
     } catch (e) { setStatus(null); setError(e instanceof Error ? e.message : "AirWatch is unavailable"); }
   }, []);
-  useEffect(() => { void refresh(); const id = window.setInterval(() => void refresh(), 4000); return () => window.clearInterval(id); }, [refresh]);
+  useEffect(() => {
+    let active = true;
+    let timer = 0;
+    const poll = async () => {
+      await refresh();
+      if (active) timer = window.setTimeout(() => void poll(), 4000);
+    };
+    void poll();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [refresh]);
   return { status, samples, error, lastSuccess, refresh, connected: !!status && !error, accessKey, setAccessKey };
 }
 
