@@ -6,6 +6,7 @@ import { setBuzzerMuted, setDisplayTheme, setFanMode } from "./services/airwatch
 import { bluetooth, type BluetoothDeviceInfo } from "./services/airwatchBluetooth";
 import { supabaseConfigured } from "./services/supabase";
 import CloudAccountScreen from "./components/CloudAccountScreen";
+import DeploymentGuidePage from "./components/DeploymentGuidePage";
 
 type IconName =
   | "air"
@@ -1728,10 +1729,11 @@ export default function App() {
       setThemePending(false);
     }
   };
-  if (cloudAccount.configured && cloudAccount.loading && (Capacitor.isNativePlatform() || active !== "Home")) {
+  const publicWebPage = !Capacitor.isNativePlatform() && (active === "Home" || active === "Deployment Guide");
+  if (cloudAccount.configured && cloudAccount.loading && !publicWebPage) {
     return <main className="cloud-auth-page"><p role="status">Loading your private AirWatch account…</p></main>;
   }
-  if (cloudAccount.configured && !cloudAccount.user && (Capacitor.isNativePlatform() || active !== "Home")) {
+  if (cloudAccount.configured && !cloudAccount.user && !publicWebPage) {
     return <CloudAccountScreen onBack={!Capacitor.isNativePlatform() ? () => setActive("Home") : undefined} />;
   }
   if (!Capacitor.isNativePlatform() && showcase === "mobile") return <MobileApp onExit={() => setShowcase("web")} />;
@@ -1764,11 +1766,15 @@ export default function App() {
           </button>
         </div>
         <nav className="main-nav">
-          <span className="nav-label">Site</span>
-          <button onClick={() => go("Home")} className={active === "Home" ? "active" : ""}>
-            <Icon name="air" />
-            <span>Home</span>
-          </button>
+          {!Capacitor.isNativePlatform() && (
+            <>
+              <span className="nav-label">Site</span>
+              <button onClick={() => go("Home")} className={active === "Home" ? "active" : ""}>
+                <Icon name="air" />
+                <span>Home</span>
+              </button>
+            </>
+          )}
           <span className="nav-label">Monitoring</span>
           {navItems.slice(0, 3).map(([name, icon]) => (
             <button key={name} onClick={() => go(name)} className={active === name ? "active" : ""}>
@@ -1784,6 +1790,12 @@ export default function App() {
               <span>{name}</span>
             </button>
           ))}
+          {!Capacitor.isNativePlatform() && (
+            <button onClick={() => go("Deployment Guide")} className={active === "Deployment Guide" ? "active" : ""}>
+              <Icon name="shield" />
+              <span>Deployment Guide</span>
+            </button>
+          )}
         </nav>
         {!Capacitor.isNativePlatform() && (
           <div className="experience-switch">
@@ -1872,12 +1884,13 @@ export default function App() {
           {active === "Home" && !Capacitor.isNativePlatform() && (
             <LandingPage onOpenDashboard={() => go("Overview")} />
           )}
-          {active !== "Home" && !Capacitor.isNativePlatform() && !supabaseConfigured && (
+          {active !== "Home" && active !== "Deployment Guide" && !Capacitor.isNativePlatform() && !supabaseConfigured && (
             <div className="cloud-setup-notice" role="status">
               Private website readings are not configured yet. Add your Supabase URL and anon key to the deployment environment.
             </div>
           )}
-          {active !== "Home" && cloudSyncError && <div className="cloud-sync-error" role="alert">Cloud sync failed: {cloudSyncError}</div>}
+          {active !== "Home" && active !== "Deployment Guide" && cloudSyncError && <div className="cloud-sync-error" role="alert">Cloud sync failed: {cloudSyncError}</div>}
+          {active === "Deployment Guide" && <DeploymentGuidePage onOpenHome={() => go("Home")} />}
           {active === "Overview" && <Overview onConnectionClick={() => go("Bluetooth Connection")} />}
           {active === "Live Monitoring" && <ApiPage />}
           {active === "Historical Data" && <HistoryPage />}
