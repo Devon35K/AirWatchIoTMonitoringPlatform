@@ -1,18 +1,14 @@
 /*
  AirWatch v3.3 MODERN LANDSCAPE + STARTUP CHIME — ESP32-S3-N16R8
  Original GPIO assignments and original device functions retained.
- Features: Modern 320x240 TFT, four swipe pages, Wi-Fi (AP + STA),
- LittleFS React/Vite site hosting, JSON sensor APIs and remote controls.
+ Features: Modern 320x240 TFT, four swipe pages, Bluetooth Low Energy
+ sensor updates and remote controls.
  Hardware outputs GPIO6/7 MUST drive appropriate transistor/MOSFET stages;
  never connect a motor or high-current buzzer directly to an ESP32 GPIO.
- Wi-Fi is 2.4 GHz. Use trusted local networks only (HTTP, not HTTPS).
 */
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <LittleFS.h>
 #include <Preferences.h>
 #include <time.h>
 #include <Adafruit_GFX.h>
@@ -20,8 +16,12 @@
 #include <XPT2046_Touchscreen.h>
 #include <Adafruit_NeoPixel.h>
 #include <SensirionI2cScd4x.h>
-#include <qrcode.h> // ESP32-S3 built-in Espressif QR encoder
 #include <math.h>
+#include <sys/time.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 
 // Original project GPIOs
 #define PIN_SDA 4
@@ -62,10 +62,9 @@ Adafruit_ILI9341 tft(TFT_CS,TFT_DC,TFT_RST);
 XPT2046_Touchscreen touch(TOUCH_CS);
 Adafruit_NeoPixel pixels(1,NEOPIXEL_PIN,NEO_GRB+NEO_KHZ800);
 SensirionI2cScd4x scd4x;
-WebServer server(80);
 Preferences prefs;
 
-enum Page : uint8_t { PAGE_HOME=0, PAGE_CLOCK=1, PAGE_WIFI=2, PAGE_TIME=3 };
+enum Page : uint8_t { PAGE_HOME=0, PAGE_CLOCK=1, PAGE_BLUETOOTH=2, PAGE_TIME=3 };
 enum FanMode : uint8_t { FAN_AUTO=0, FAN_FORCE_ON=1, FAN_FORCE_OFF=2 };
 Page currentPage=PAGE_HOME;
 FanMode fanMode=FAN_AUTO;
@@ -74,8 +73,9 @@ uint16_t co2ppm=0;
 float temperatureC=NAN, humidityRH=NAN;
 float fanOnTemp=30.0f, fanOffTemp=28.0f;
 uint16_t alarmOnPPM=2000, alarmOffPPM=1800;
-unsigned long lastSensorPoll=0,lastDisplayUpdate=0,lastBeepToggle=0,lastWifiAttempt=0,lastWifiScreenUpdate=0;
+unsigned long lastSensorPoll=0,lastDisplayUpdate=0,lastBeepToggle=0;
 uint32_t latestSampleMillis=0;
+uint32_t latestReadingEpoch=0;
 uint64_t uptimeMs64=0;
 uint32_t previousMillis32=0;
 bool pageNeedsDraw=true;
@@ -85,10 +85,6 @@ const bool STARTUP_SOUND_ENABLED = true;
 bool startupSoundAllowed = true;
 uint8_t bootProgress = 0;
 
-String apSSID,apPassword,adminKey,staSSID,staPassword;
-bool setupRequired=false;
-String lastWiFiSignature;
-const char* HOSTNAME="airwatch";
 // All samples are volatile: they disappear when the ESP32 restarts.
 const size_t HISTORY_CAP=360;
 struct Sample { uint32_t uptimeSec; uint32_t epoch; uint16_t ppm; int16_t temp10; uint16_t rh10; };
@@ -106,6 +102,10 @@ unsigned long touchStartMs=0,touchLastSeenMs=0;
 bool lastButtonState=HIGH,lastMuteState=HIGH;
 unsigned long lastButtonChange=0,lastMuteChange=0;
 const unsigned long DEBOUNCE_MS=50;
+BLEServer* bleServer=nullptr;
+BLECharacteristic* bleStatusCharacteristic=nullptr;
+BLECharacteristic* bleControlCharacteristic=nullptr;
+volatile bool bleClientConnected=false;
 
 void textAt(const String& s, int x, int y, uint8_t sz, uint16_t color) {
   tft.setTextWrap(false);
@@ -122,45 +122,61 @@ void panel(int x,int y,int w,int h) {
   tft.drawRoundRect(x,y,w,h,11,PANEL2);
 }
 void labelCaps(const String& s, int x, int y) { textAt(s,x,y,1,GREY); }
-void drawLogoSegment(int x,int y,int size,float x1,float y1,float x2,float y2,int stroke) {
-  const float scale=size/40.0f;
-  int sx=x+(int)lroundf((8.0f+x1)*scale), sy=y+(int)lroundf((8.0f+y1)*scale);
-  int ex=x+(int)lroundf((8.0f+x2)*scale), ey=y+(int)lroundf((8.0f+y2)*scale);
-  tft.drawLine(sx,sy,ex,ey,WHITE);
-  if(stroke>1) { tft.fillCircle(sx,sy,stroke/2,WHITE); tft.fillCircle(ex,ey,stroke/2,WHITE); }
-}
-void drawLogoArc(int x,int y,int size,float x1,float y1,float x2,float y2,float radius,bool largeArc,bool sweep,int stroke) {
-  const float scale=size/40.0f;
-  const float dx=(x1-x2)*0.5f, dy=(y1-y2)*0.5f;
-  float r2=radius*radius, lambda=(dx*dx+dy*dy)/r2;
-  if(lambda>1.0f) { radius*=sqrtf(lambda); r2=radius*radius; }
-  float factor=sqrtf(max(0.0f,(r2-dx*dx-dy*dy)/(dx*dx+dy*dy)));
-  if(largeArc==sweep) factor=-factor;
-  const float cx=(x1+x2)*0.5f+factor*dy, cy=(y1+y2)*0.5f-factor*dx;
-  const float start=atan2f(y1-cy,x1-cx), finish=atan2f(y2-cy,x2-cx);
-  float delta=finish-start;
-  if(!sweep && delta>0) delta-=2.0f*PI;
-  if(sweep && delta<0) delta+=2.0f*PI;
-  if(largeArc && fabsf(delta)<PI) delta+=sweep?2.0f*PI:-2.0f*PI;
-  if(!largeArc && fabsf(delta)>PI) delta+=sweep?-2.0f*PI:2.0f*PI;
-  const int steps=max(8,(int)(fabsf(delta)*radius*scale*1.5f));
-  float px=x1,py=y1;
-  for(int i=1;i<=steps;i++) {
-    float a=start+delta*(float)i/steps;
-    float nx=cx+radius*cosf(a),ny=cy+radius*sinf(a);
-    drawLogoSegment(x,y,size,px,py,nx,ny,stroke);
-    px=nx;py=ny;
-  }
-}
+const uint8_t AIRWATCH_LOGO_BITMAP[] PROGMEM = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x7F, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xFF, 0xC0, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x01, 0xFF, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xFF, 0xF0, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x03, 0xF3, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xE1, 0xF8, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x07, 0xC0, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xC0, 0xF8, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00, 0x00, 0x00, 0x03, 0xFF, 0xFF, 0xFF, 0xF0, 0x00, 0x00,
+  0x00, 0x07, 0xFF, 0xFF, 0xFF, 0xE0, 0x00, 0x00, 0x00, 0x07, 0xFF, 0xFF, 0xFF, 0xE0, 0x00, 0x00,
+  0x00, 0x07, 0xFF, 0xFF, 0xFF, 0xC0, 0x00, 0x00, 0x00, 0x07, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xE0, 0x00,
+  0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF8, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC, 0x00,
+  0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x00,
+  0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x07, 0xFF, 0xFF, 0xC0, 0x38, 0x0F, 0x80,
+  0x00, 0x07, 0xFF, 0xFF, 0xF0, 0x7C, 0x0F, 0x00, 0x00, 0x07, 0xFF, 0xFF, 0xF8, 0x7C, 0x1F, 0x00,
+  0x00, 0x07, 0xFF, 0xFF, 0xFC, 0x7E, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x01, 0xFC, 0x3F, 0xFF, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x7C, 0x3F, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3E, 0x1F, 0xFC, 0x00,
+  0x00, 0x00, 0x00, 0x60, 0x3E, 0x0F, 0xF8, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x3E, 0x03, 0xE0, 0x00,
+  0x00, 0x00, 0x00, 0xF0, 0x3E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x7E, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0xFC, 0xFC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFC, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x7F, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0xF0, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x1F, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
 void drawAirWatchLogo(int x, int y, int size) {
+  if(size<=0)return;
   const int radius=size*12/40;
-  const int stroke=max(1,(size*23+200)/400);
   tft.fillRoundRect(x,y,size,size,radius,0x1148);
-  drawLogoSegment(x,y,size,4,8.5f,13.5f,8.5f,stroke);
-  drawLogoArc(x,y,size,13.5f,8.5f,11.3f,4.8f,2.5f,true,false,stroke);
-  drawLogoSegment(x,y,size,3,12,18.5f,12,stroke);
-  drawLogoArc(x,y,size,18.5f,12,16.3f,15.7f,2.5f,true,true,stroke);
-  drawLogoSegment(x,y,size,4,15.5f,11,15.5f,stroke);
+  for(int dy=0;dy<size;dy++){
+    const int sourceY=dy*64/size;
+    int runStart=-1;
+    for(int dx=0;dx<=size;dx++){
+      bool mark=false;
+      if(dx<size){
+        const int sourceX=dx*64/size;
+        const uint8_t bits=pgm_read_byte(&AIRWATCH_LOGO_BITMAP[sourceY*8+sourceX/8]);
+        mark=(bits&(0x80>>(sourceX&7)))!=0;
+      }
+      if(mark&&runStart<0)runStart=dx;
+      else if(!mark&&runStart>=0){
+        tft.drawFastHLine(x+runStart,y+dy,dx-runStart,WHITE);
+        runStart=-1;
+      }
+    }
+  }
 }
 void navDots() {
   for(int i=0;i<4;i++) {
@@ -192,7 +208,7 @@ void fanUpdate(){if(!systemOn)fanOn=false;else if(fanMode==FAN_FORCE_ON)fanOn=tr
 void ledUpdate(){pixels.clear();if(systemOn&&valid()){if(co2ppm<800)pixels.setPixelColor(0,pixels.Color(0,255,0));else if(co2ppm<2000)pixels.setPixelColor(0,pixels.Color(255,180,0));else pixels.setPixelColor(0,pixels.Color(255,0,0));}pixels.show();}
 void buzzerUpdate(){if(!systemOn||!valid()){buzzerActive=false;}else if(co2ppm>=alarmOnPPM)buzzerActive=true;else if(co2ppm<alarmOffPPM)buzzerActive=false;}
 void handleBuzzer(){if(!systemOn||!soundEnabled||!buzzerActive){digitalWrite(BUZZER_PIN,LOW);beepState=false;lastBeepToggle=millis();return;}uint32_t now=millis();if(now-lastBeepToggle >= (beepState?200UL:800UL)){lastBeepToggle=now;beepState=!beepState;digitalWrite(BUZZER_PIN,beepState?HIGH:LOW);}}
-void readSensor(){if(!sensorOK)return;bool ready=false;int16_t err=scd4x.getDataReadyStatus(ready);if(err||!ready)return;uint16_t c=0;float t=NAN,h=NAN;err=scd4x.readMeasurement(c,t,h);if(err||!c||isnan(t)||isnan(h))return;co2ppm=c;temperatureC=t;humidityRH=h;latestSampleMillis=millis();addSample();fanUpdate();ledUpdate();buzzerUpdate();Serial.printf("[SCD41] %u ppm, %.1f C, %.1f %%RH\n",co2ppm,temperatureC,humidityRH);}
+void readSensor(){if(!sensorOK)return;bool ready=false;int16_t err=scd4x.getDataReadyStatus(ready);if(err||!ready)return;uint16_t c=0;float t=NAN,h=NAN;err=scd4x.readMeasurement(c,t,h);if(err||!c||isnan(t)||isnan(h))return;co2ppm=c;temperatureC=t;humidityRH=h;latestSampleMillis=millis();time_t sampleTime=time(nullptr);latestReadingEpoch=sampleTime>1700000000?(uint32_t)sampleTime:0;addSample();fanUpdate();ledUpdate();buzzerUpdate();Serial.printf("[SCD41] %u ppm, %.1f C, %.1f %%RH\n",co2ppm,temperatureC,humidityRH);}
 
 // -------------------- MODERN 320 x 240 LANDSCAPE UI --------------------
 // Active buzzer (not a passive piezo): short on/off chirps, not musical tones.
@@ -307,7 +323,7 @@ void drawClock() {
   tft.drawFastHLine(24,158,272,PANEL2);
   labelCaps("STATUS",25,174);
   textAt("MONITOR ONLINE",77,174,1,GREEN);
-  footer("SWIPE LEFT FOR WI-FI SETUP");
+  footer("SWIPE LEFT FOR BLUETOOTH");
 }
 void updateClock() {
   uint64_t secs=uptimeMs64/1000ULL;
@@ -326,16 +342,16 @@ void drawTimeDate() {
   panel(10,55,300,149);
   labelCaps("PHILIPPINE STANDARD TIME / UTC+8",23,72);
   tft.drawFastHLine(24,157,272,PANEL2);
-  labelCaps("NTP TIME SYNC REQUIRES INTERNET",25,172);
-  footer("SWIPE RIGHT FOR WI-FI SETUP");
+  labelCaps("SYNC FROM PHONE OVER BLUETOOTH",25,172);
+  footer("SWIPE RIGHT FOR BLUETOOTH");
 }
 void updateTimeDate() {
   time_t now=time(nullptr);
   tft.fillRect(20,99,280,52,PANEL);
   tft.fillRect(20,185,280,16,PANEL);
   if(now<1700000000) {
-    centerAt("SYNCING TIME",160,110,2,YELLOW);
-    centerAt("CONNECT TO INTERNET",160,187,1,GREY);
+    centerAt("TIME UNAVAILABLE",160,110,2,YELLOW);
+    centerAt("USE THE PHONE CLOCK",160,187,1,GREY);
     return;
   }
   struct tm lt;
@@ -346,51 +362,16 @@ void updateTimeDate() {
   centerAt(timeText,160,109,3,TEXT);
   centerAt(dateText,160,187,1,CYAN);
 }
-String staIP(){return WiFi.status()==WL_CONNECTED?WiFi.localIP().toString():"";}
-String currentURL(){return String("http://")+(WiFi.status()==WL_CONNECTED?WiFi.localIP().toString():WiFi.softAPIP().toString())+"/";}
-// ESP32 Arduino core provides the Espressif QR encoder through qrcode.h.
-// This avoids the header-name collision with the separate Ricmoo QRCode library.
-void drawQRModules(esp_qrcode_handle_t qr) {
-  const int qrSize=esp_qrcode_get_size(qr);
-  const int quiet=4;
-  const int module=(qrSize+2*quiet<=45)?3:2;
-  const int side=(qrSize+2*quiet)*module;
-  const int x0=18+(140-side)/2;
-  const int y0=62+(144-side)/2;
-  tft.fillRect(x0,y0,side,side,WHITE);
-  for(int y=0;y<qrSize;y++)
-    for(int x=0;x<qrSize;x++)
-      if(esp_qrcode_get_module(qr,x,y))
-        tft.fillRect(x0+(x+quiet)*module,y0+(y+quiet)*module,module,module,0x0000);
+void drawBluetooth() {
+  tft.fillScreen(BG);header("PHONE / BLUETOOTH");
+  panel(18,58,284,142);
+  centerAt("AIRWATCH BLE",160,79,2,CYAN);
+  centerAt("OPEN THE AIRWATCH APP",160,119,1,TEXT);
+  centerAt("AND SCAN FOR A DEVICE",160,143,1,TEXT);
+  centerAt("LIVE SENSOR DATA STREAMS",160,173,1,GREEN);
+  footer("KEEP BLUETOOTH ENABLED ON PHONE");
 }
-void drawQR(const String& url) {
-  esp_qrcode_config_t config={};
-  config.display_func=drawQRModules;
-  config.max_qrcode_version=5;
-  config.qrcode_ecc_level=ESP_QRCODE_ECC_LOW;
-  if(esp_qrcode_generate(&config,url.c_str())!=ESP_OK)
-    centerAt("QR ERROR",88,131,1,RED);
-}
-void drawWiFi() {
-  tft.fillScreen(BG);header("NETWORK / CONNECT");
-  panel(10,50,155,166);
-  panel(173,50,137,166);
-  labelCaps("SCAN FOR DASHBOARD",23,60);
-  drawQR(currentURL());
-  const bool connected=WiFi.status()==WL_CONNECTED;
-  textAt(connected?"ROUTER ONLINE":"SETUP AP ACTIVE",181,62,1,connected?GREEN:YELLOW);
-  labelCaps("DEVICE IP",181,81);
-  textAt(connected?staIP():WiFi.softAPIP().toString(),181,94,1,TEXT);
-  labelCaps("SETUP WI-FI",181,116);
-  textAt(apSSID,181,129,1,CYAN);
-  labelCaps("AP PASSWORD",181,151);
-  textAt(apPassword.isEmpty()?"NOT SET":apPassword,181,163,1,TEXT);
-  labelCaps("CONTROL KEY",181,185);
-  // Long key is intentionally clipped to the card width on small displays.
-  textAt(adminKey.isEmpty()?"NOT SET":adminKey,181,198,1,CYAN);
-  footer("JOIN NETWORK BEFORE SCANNING QR");
-}
-void drawPage(){deselectSPI();if(currentPage==PAGE_HOME)drawHome();else if(currentPage==PAGE_CLOCK)drawClock();else if(currentPage==PAGE_WIFI)drawWiFi();else drawTimeDate();pageNeedsDraw=false;}
+void drawPage(){deselectSPI();if(currentPage==PAGE_HOME)drawHome();else if(currentPage==PAGE_CLOCK)drawClock();else if(currentPage==PAGE_BLUETOOTH)drawBluetooth();else drawTimeDate();pageNeedsDraw=false;}
 void changePage(int direction){int p=((int)currentPage+direction+4)%4;currentPage=(Page)p;pageNeedsDraw=true;touching=false;}
 bool readTouch(int&sx,int&sy){digitalWrite(TFT_CS,HIGH);digitalWrite(SD_CS,HIGH);if(!touch.touched()){digitalWrite(TOUCH_CS,HIGH);return false;}TS_Point p=touch.getPoint();digitalWrite(TOUCH_CS,HIGH);int a=TOUCH_SWAP_XY?p.y:p.x,b=TOUCH_SWAP_XY?p.x:p.y;sx=map(a,TOUCH_X_MIN,TOUCH_X_MAX,0,TFT_WIDTH-1);sy=map(b,TOUCH_Y_MIN,TOUCH_Y_MAX,0,TFT_HEIGHT-1);if(TOUCH_INVERT_X)sx=TFT_WIDTH-1-sx;if(TOUCH_INVERT_Y)sy=TFT_HEIGHT-1-sy;sx=constrain(sx,0,TFT_WIDTH-1);sy=constrain(sy,0,TFT_HEIGHT-1);return true;}
 void checkSwipe(){int x,y;unsigned long now=millis();if(readTouch(x,y)){if(!touching){touching=true;touchStartX=x;touchStartY=y;touchStartMs=now;}touchLastX=x;touchLastY=y;touchLastSeenMs=now;return;}if(touching&&now-touchLastSeenMs>TOUCH_RELEASE_MS){touching=false;int dx=touchLastX-touchStartX,dy=touchLastY-touchStartY;if(touchLastSeenMs-touchStartMs<=SWIPE_MAX_MS&&abs(dx)>=SWIPE_MIN_PX&&abs(dx)>abs(dy)*2)changePage(dx<0?1:-1);}}
@@ -421,91 +402,131 @@ String getJsonString(const String&body,const char*name){
   }
   return "";
 }
-void noCache(){server.sendHeader("Cache-Control","no-store");server.sendHeader("X-Content-Type-Options","nosniff");}
-void sendError(int code,const String&msg){noCache();server.send(code,"application/json",String("{\"error\":\"")+msg+"\"}");}
-bool authenticated(){String incoming=server.header("X-AirWatch-Key");if(!setupRequired&&!adminKey.isEmpty()&&incoming.length()==adminKey.length()&&incoming==adminKey)return true;sendError(403,setupRequired?"Complete device setup first":"Incorrect device access key");return false;}
-String jsonEscape(const String& input) {
-  String result;result.reserve(input.length()+8);
-  for(size_t i=0;i<input.length();i++) {
-    unsigned char c=(unsigned char)input[i];
-    if(c=='"'||c=='\\'){result+='\\';result+=(char)c;}
-    else if(c=='\n')result+="\\n";
-    else if(c=='\r')result+="\\r";
-    else if(c=='\t')result+="\\t";
-    else if(c<0x20)result+=' ';
-    else result+=(char)c;
-  }
-  return result;
+String makeStatusJson(){
+  String out="{";
+  out+="\"setupRequired\":false";
+  out+=",\"valid\":"+String(valid()?"true":"false");
+  out+=",\"co2\":"+String(valid()?co2ppm:0);
+  out+=",\"temperature\":"+String(valid()?temperatureC:0,1);
+  out+=",\"humidity\":"+String(valid()?humidityRH:0,1);
+  out+=",\"quality\":\""+String(valid()?qualityName(co2ppm):"WAITING")+"\"";
+  out+=",\"displayTheme\":\""+displayTheme+"\"";
+  out+=",\"fanOn\":"+String(fanOn?"true":"false");
+  out+=",\"fanMode\":\""+String(fanModeName())+"\"";
+  out+=",\"muted\":"+String(soundEnabled?"false":"true");
+  out+=",\"alarmActive\":"+String(buzzerActive?"true":"false");
+  out+=",\"systemOn\":"+String(systemOn?"true":"false");
+  out+=",\"uptimeSeconds\":"+String((unsigned long)(uptimeMs64/1000ULL));
+  out+=",\"lastReadingUptime\":"+String((unsigned long)latestSampleMillis);
+  out+=",\"lastReadingEpoch\":"+String((unsigned long)latestReadingEpoch);
+  out+=",\"wifi\":{\"connected\":false,\"ssid\":\"\",\"ip\":\"\",\"apSSID\":\"\",\"apIP\":\"\"}}";
+  return out;
 }
-void handleStatus(){noCache();String out="{";out+="\"setupRequired\":"+String(setupRequired?"true":"false");out+=",\"valid\":"+String(valid()?"true":"false");out+=",\"co2\":"+String(valid()?co2ppm:0);out+=",\"temperature\":"+String(valid()?temperatureC:0,1);out+=",\"humidity\":"+String(valid()?humidityRH:0,1);out+=",\"quality\":\""+(valid()?qualityName(co2ppm):"WAITING")+"\"";out+=",\"displayTheme\":\""+displayTheme+"\"";out+=",\"fanOn\":"+String(fanOn?"true":"false");out+=",\"fanMode\":\""+String(fanModeName())+"\"";out+=",\"muted\":"+String(soundEnabled?"false":"true");out+=",\"alarmActive\":"+String(buzzerActive?"true":"false");out+=",\"systemOn\":"+String(systemOn?"true":"false");out+=",\"uptimeSeconds\":"+String((unsigned long)(uptimeMs64/1000ULL));out+=",\"lastReadingUptime\":"+String((unsigned long)latestSampleMillis);uint32_t stamp=0;if(historySize)stamp=history[(historyHead+HISTORY_CAP-1)%HISTORY_CAP].epoch;out+=",\"lastReadingEpoch\":"+String(stamp);out+=",\"wifi\":{\"connected\":"+String(WiFi.status()==WL_CONNECTED?"true":"false");out+=",\"ssid\":\""+jsonEscape(WiFi.status()==WL_CONNECTED?WiFi.SSID():String("-"))+"\"";out+=",\"ip\":\""+staIP()+"\"";out+=",\"apSSID\":\""+apSSID+"\"";out+=",\"apIP\":\""+WiFi.softAPIP().toString()+"\"}}";server.send(200,"application/json",out);}
-void handleHistory(){noCache();server.setContentLength(CONTENT_LENGTH_UNKNOWN);server.send(200,"application/json","");server.sendContent("{\"samples\":[");for(size_t i=0;i<historySize;i++){const Sample&s=history[(historyHead+HISTORY_CAP-historySize+i)%HISTORY_CAP];String row=(i?",":"");row+="{\"uptime\":"+String(s.uptimeSec)+",\"epoch\":"+String(s.epoch)+",\"co2\":"+String(s.ppm)+",\"temp\":"+String(s.temp10/10.0f,1)+",\"hum\":"+String(s.rh10/10.0f,1)+"}";server.sendContent(row);}server.sendContent("]}");server.sendContent("");}
-void handleControl(){
-  if(!authenticated())return;
-  String body=server.arg("plain");
-  if(body.length()>512){sendError(413,"Command too large");return;}
+bool applyControl(const String& body){
+  if(body.length()>512)return false;
   String fm=getJsonString(body,"fanMode");
   String mute=getJsonString(body,"muted");
   String theme=getJsonString(body,"displayTheme");
-  if(fm.isEmpty() && mute.isEmpty() && theme.isEmpty()){sendError(400,"No supported control provided");return;}
-  if(!fm.isEmpty() && fm!="auto" && fm!="on" && fm!="off"){
-    sendError(400,"Invalid fan mode");return;
+  String unixTime=getJsonString(body,"unixTime");
+  const bool hasFan=body.indexOf("\"fanMode\"")>=0;
+  const bool hasMute=body.indexOf("\"muted\"")>=0;
+  const bool hasTheme=body.indexOf("\"displayTheme\"")>=0;
+  const bool hasTime=body.indexOf("\"unixTime\"")>=0;
+  if(!hasFan&&!hasMute&&!hasTheme&&!hasTime)return false;
+  if(hasFan&&fm!="auto"&&fm!="on"&&fm!="off")return false;
+  if(hasMute&&mute!="true"&&mute!="false")return false;
+  if(hasTheme&&theme!="light"&&theme!="dark")return false;
+  uint64_t epoch=0;
+  if(hasTime){
+    if(unixTime.length()==0)return false;
+    for(size_t i=0;i<unixTime.length();i++)if(!isdigit((unsigned char)unixTime[i]))return false;
+    epoch=strtoull(unixTime.c_str(),nullptr,10);
+    if(epoch<1700000000ULL||epoch>4102444800ULL)return false;
+    struct timeval now={};
+    now.tv_sec=(time_t)epoch;
+    if(settimeofday(&now,nullptr)!=0)return false;
   }
-  if(!mute.isEmpty() && mute!="true" && mute!="false"){
-    sendError(400,"Invalid mute value");return;
-  }
-  if(!theme.isEmpty() && theme!="light" && theme!="dark"){
-    sendError(400,"Invalid display theme");return;
-  }
-  // Apply only after every supplied field is valid.
   if(fm=="auto")fanMode=FAN_AUTO;
   else if(fm=="on")fanMode=FAN_FORCE_ON;
   else if(fm=="off")fanMode=FAN_FORCE_OFF;
   if(mute=="true")soundEnabled=false;
   else if(mute=="false")soundEnabled=true;
-  if(!theme.isEmpty()){
+  if(hasTheme){
     applyDisplayTheme(theme);
     prefs.putString("theme",displayTheme);
   }
   fanUpdate();
   if(!soundEnabled){digitalWrite(BUZZER_PIN,LOW);beepState=false;}
   pageNeedsDraw=true;
-  noCache();server.send(200,"application/json","{\"ok\":true}");
+  return true;
 }
-void connectSTA(){if(staSSID.isEmpty())return;lastWifiAttempt=millis();WiFi.begin(staSSID.c_str(),staPassword.c_str());Serial.println("[WIFI] Connecting to saved network...");}
-void handleSetup(){if(!setupRequired){sendError(409,"Device setup is already complete");return;}String body=server.arg("plain");String key=getJsonString(body,"accessKey"),pass=getJsonString(body,"apPassword");if(key.length()<12||key.length()>64||pass.length()<8||pass.length()>63){sendError(400,"Access key must be 12-64 characters and AP password 8-63 characters");return;}adminKey=key;apPassword=pass;prefs.putString("admin",adminKey);prefs.putString("apPass",apPassword);setupRequired=false;noCache();server.send(200,"application/json","{\"ok\":true}");delay(300);WiFi.softAPdisconnect(false);WiFi.softAP(apSSID.c_str(),apPassword.c_str());pageNeedsDraw=true;}
-void handleWiFi(){if(!authenticated())return;String body=server.arg("plain");if(body.length()>512){sendError(413,"Wi-Fi request too large");return;}String ssid=getJsonString(body,"ssid"),pass=getJsonString(body,"password");if(ssid.length()==0||ssid.length()>32||pass.length()>63){sendError(400,"Invalid SSID or password length");return;}staSSID=ssid;staPassword=pass;prefs.putString("ssid",staSSID);prefs.putString("pass",staPassword);noCache();server.send(200,"application/json","{\"ok\":true}");WiFi.disconnect(false,false);connectSTA();pageNeedsDraw=true;}
-bool serveStaticFile(String path){
-  if(path.isEmpty()||path=="/")path="/index.html";
-  if(path.indexOf("..")>=0||path.indexOf('\\')>=0)return false;
-  if(!LittleFS.exists(path))return false;
-  File file=LittleFS.open(path,"r");if(!file)return false;
-  String type="application/octet-stream";
-  if(path.endsWith(".html"))type="text/html; charset=utf-8";
-  else if(path.endsWith(".js"))type="text/javascript";
-  else if(path.endsWith(".css"))type="text/css";
-  else if(path.endsWith(".svg"))type="image/svg+xml";
-  else if(path.endsWith(".png"))type="image/png";
-  else if(path.endsWith(".ico"))type="image/x-icon";
-  else if(path.endsWith(".json"))type="application/json";
-  else if(path.endsWith(".woff2"))type="font/woff2";
-  if(path=="/index.html")server.sendHeader("Cache-Control","no-cache");
-  else server.sendHeader("Cache-Control","public, max-age=31536000, immutable");
-  server.sendHeader("X-Content-Type-Options","nosniff");
-  server.streamFile(file,type);file.close();return true;
+void updateBLEStatus();
+class AirWatchBLEServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* server){bleClientConnected=true;server->startAdvertising();}
+  void onDisconnect(BLEServer* server){bleClientConnected=false;server->startAdvertising();}
+};
+class AirWatchBLEControlCallbacks: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* characteristic){
+    String body=characteristic->getValue().c_str();
+    if(!applyControl(body)){Serial.println("[BLE] Rejected invalid control command");return;}
+    updateBLEStatus();
+    Serial.println("[BLE] Control command applied");
+  }
+};
+void notifyBLEStatus(const String& json){
+  if(!bleStatusCharacteristic)return;
+  if(!bleClientConnected){bleStatusCharacteristic->setValue(json.c_str());return;}
+  static uint8_t sequence=0;
+  const size_t payloadSize=11;
+  const size_t chunkCount=(json.length()+payloadSize-1)/payloadSize;
+  if(chunkCount==0||chunkCount>255)return;
+  const uint8_t currentSequence=sequence++;
+  for(size_t index=0;index<chunkCount;index++){
+    char header[8];
+    snprintf(header,sizeof(header),"%02X%02X%02X:",(unsigned)currentSequence,(unsigned)index,(unsigned)chunkCount);
+    String frame="A:";
+    frame+=header;
+    frame+=json.substring(index*payloadSize,(index+1)*payloadSize);
+    bleStatusCharacteristic->setValue(frame.c_str());
+    bleStatusCharacteristic->notify();
+    delay(10);
+  }
+  bleStatusCharacteristic->setValue(json.c_str());
 }
-void setupServer(){
-  const char*keys[]={"X-AirWatch-Key"};server.collectHeaders(keys,1);
-  server.on("/",HTTP_GET,[]{if(!serveStaticFile("/index.html"))server.send(503,"text/plain","AirWatch dashboard files are missing from LittleFS");});
-  server.on("/api/setup",HTTP_POST,handleSetup);server.on("/api/status",HTTP_GET,handleStatus);server.on("/api/history",HTTP_GET,handleHistory);
-  server.on("/api/control",HTTP_POST,handleControl);server.on("/api/wifi",HTTP_POST,handleWiFi);
-  server.onNotFound([]{String path=server.uri();if(path.startsWith("/api/")){sendError(404,"API endpoint not found");return;}if(!serveStaticFile(path))server.send(404,"text/plain","File not found");});
-  server.begin();
+void updateBLEStatus(){
+  if(!bleStatusCharacteristic)return;
+  String out=makeStatusJson();
+  notifyBLEStatus(out);
 }
-void initWiFi(){prefs.begin("airwatch",false);applyDisplayTheme(prefs.getString("theme","dark"));uint64_t mac=ESP.getEfuseMac();char suffix[9];snprintf(suffix,sizeof(suffix),"%08lX",(unsigned long)(mac&0xffffffffULL));apSSID="AirWatch-"+String(suffix).substring(4);apPassword=prefs.getString("apPass","");adminKey=prefs.getString("admin","");setupRequired=apPassword.isEmpty()||adminKey.isEmpty();staSSID=prefs.getString("ssid","");staPassword=prefs.getString("pass","");WiFi.mode(WIFI_AP_STA);WiFi.setHostname(HOSTNAME);WiFi.softAP(apSSID.c_str(),apPassword.isEmpty()?nullptr:apPassword.c_str());if(!staSSID.isEmpty())connectSTA();setupServer();configTime(8*3600,0,"pool.ntp.org","time.google.com");Serial.println("[WIFI] AP SSID: "+apSSID);Serial.println("[WIFI] AP IP: "+WiFi.softAPIP().toString());Serial.println("[WIFI] View TFT Page 3 for password and control key");}
-void maintainWiFi(){if(!staSSID.isEmpty()&&WiFi.status()!=WL_CONNECTED&&millis()-lastWifiAttempt>20000UL)connectSTA();String sig=String(WiFi.status()==WL_CONNECTED?"1":"0")+staIP();if(sig!=lastWiFiSignature){lastWiFiSignature=sig;if(currentPage==PAGE_WIFI)pageNeedsDraw=true;Serial.println("[WIFI] Dashboard: "+currentURL());}}
+void setupBLE(){
+  uint64_t mac=ESP.getEfuseMac();
+  char suffix[9];snprintf(suffix,sizeof(suffix),"%08lX",(unsigned long)(mac&0xffffffffULL));
+  String name="AirWatch-"+String(suffix).substring(4);
+  BLEDevice::init(name.c_str());
+  BLEDevice::setMTU(512);
+  bleServer=BLEDevice::createServer();
+  bleServer->setCallbacks(new AirWatchBLEServerCallbacks());
+  BLEService* service=bleServer->createService("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+  bleStatusCharacteristic=service->createCharacteristic("beb5483e-36e1-4688-b7f5-ea07361b26a8",BLECharacteristic::PROPERTY_READ|BLECharacteristic::PROPERTY_NOTIFY);
+  bleStatusCharacteristic->addDescriptor(new BLE2902());
+  bleControlCharacteristic=service->createCharacteristic("e6d2c0aa-0a6f-4f42-9f6d-4a3b7b4a1002",BLECharacteristic::PROPERTY_WRITE);
+  bleControlCharacteristic->setCallbacks(new AirWatchBLEControlCallbacks());
+  service->start();
+  BLEAdvertising* advertising=BLEDevice::getAdvertising();
+  advertising->addServiceUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+  advertising->setScanResponse(true);
+  advertising->setMinPreferred(0x06);
+  advertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
+  updateBLEStatus();
+  Serial.println("[BLE] Advertising as "+name);
+}
+void initPreferences(){prefs.begin("airwatch",false);applyDisplayTheme(prefs.getString("theme","dark"));}
 
 void setup() {
   Serial.begin(115200);
+  setenv("TZ","PHT-8",1);
+  tzset();
   applyDisplayTheme("dark");
   delay(300);
   previousMillis32 = millis();
@@ -550,19 +571,31 @@ void setup() {
   Serial.println(sensorOK ? "[SENSOR] READY" : "[SENSOR] START FAILED");
   startupProgress(75, sensorOK ? "SCD41 ONLINE" : "CHECK SCD41 WIRING", sensorOK ? 1 : 0);
 
-  if (LittleFS.begin(false)) {
-    Serial.printf("[FS] LittleFS using %u of %u bytes\n", LittleFS.usedBytes(), LittleFS.totalBytes());
-  } else {
-    Serial.println("[FS] LittleFS mount failed; upload dist/ to the filesystem partition");
-  }
-  startupProgress(87, "STORAGE READY");
+  startupProgress(87, "BLUETOOTH READY");
 
-  initWiFi();
+  initPreferences();
+  setupBLE();
   startupProgress(100, "AIRWATCH READY", 2);
   delay(220);
   digitalWrite(BUZZER_PIN, LOW);
   pageNeedsDraw = true;
-  Serial.println("[SYSTEM] AirWatch v3.3 modern landscape + startup sound ready");
+  Serial.println("[SYSTEM] AirWatch BLE-only firmware ready");
 }
 
-void loop(){uint32_t now=millis();uptimeMs64+=(uint32_t)(now-previousMillis32);previousMillis32=now;server.handleClient();maintainWiFi();checkButtons();if(systemOn){checkSwipe();if(now-lastSensorPoll>=2000UL){lastSensorPoll=now;readSensor();}if(pageNeedsDraw)drawPage();if(now-lastDisplayUpdate>=1000UL){lastDisplayUpdate=now;if(currentPage==PAGE_HOME)updateHome();else if(currentPage==PAGE_CLOCK)updateClock();else if(currentPage==PAGE_TIME)updateTimeDate();}}handleBuzzer();delay(2);}
+uint32_t lastBLEStatusUpdate=0;
+void loop(){
+  uint32_t now=millis();
+  uptimeMs64+=(uint32_t)(now-previousMillis32);previousMillis32=now;
+  checkButtons();
+  if(systemOn){
+    checkSwipe();
+    if(now-lastSensorPoll>=2000UL){lastSensorPoll=now;readSensor();}
+    if(pageNeedsDraw)drawPage();
+    if(now-lastDisplayUpdate>=1000UL){
+      lastDisplayUpdate=now;
+      if(currentPage==PAGE_HOME)updateHome();else if(currentPage==PAGE_CLOCK)updateClock();else if(currentPage==PAGE_TIME)updateTimeDate();
+    }
+  }
+  if(now-lastBLEStatusUpdate>=2000UL){lastBLEStatusUpdate=now;updateBLEStatus();}
+  handleBuzzer();delay(2);
+}

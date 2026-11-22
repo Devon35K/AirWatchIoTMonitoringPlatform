@@ -4,10 +4,11 @@ import { apiErrorMessage, normalizeApiError, parseDeviceStatus, parseMutationRes
 
 // Fixtures encode the frontend's expected contract. They are not captured hardware responses.
 const status = {
+  setupRequired: false,
   valid: false, co2: 0, temperature: 0, humidity: 0, quality: "unavailable", displayTheme: "light",
   fanOn: false, fanMode: "auto", muted: false, alarmActive: false, systemOn: true,
   uptimeSeconds: 12, lastReadingUptime: 0, lastReadingEpoch: 0,
-  wifi: { connected: false, ssid: "", ip: "", apSSID: "", apIP: "192.168.4.1" },
+  wifi: { connected: false, ssid: "", ip: "", apSSID: "", apIP: "" },
 };
 
 test("accepts explicit unavailable status without treating it as a sensor reading", () => {

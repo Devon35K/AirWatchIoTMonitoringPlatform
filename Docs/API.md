@@ -1,29 +1,40 @@
-# AirWatch API contract status
+# AirWatch Bluetooth contract
 
-## Source status
+## Transport
 
-The sketch now implements these handlers in `firmware/AirWatch.ino`. The JSON field names below are copied from the firmware serializer and the frontend runtime contract. The firmware has **not** been compiled or exercised on hardware here. Test fixtures remain contract fixtures, not captured device responses.
+The ESP32 firmware communicates with the Android APK over Bluetooth Low Energy (BLE) only. It does not expose a Wi-Fi AP/STA connection, HTTP API, or LittleFS dashboard. The service and characteristic UUIDs must match between the sketch and `android/app/src/main/java/com/devon35k/airwatch/AirWatchBluetoothPlugin.java`.
 
-## Version 1 responses
-
-`GET /api/status` returns schema version 1 and these fields:
-
-| Field | Type | Meaning in current client |
+| Purpose | UUID | Properties |
 |---|---|---|
-| `valid` | boolean | Whether a usable current sensor measurement exists |
-| `co2`, `temperature`, `humidity` | finite number | Latest values; the UI must display them only when `valid` is true |
-| `quality` | string | Device-provided project indicator label |
-| `displayTheme` | `light` or `dark` | Active TFT palette, persisted by the device |
+| AirWatch service | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` | Advertise |
+| Status | `beb5483e-36e1-4688-b7f5-ea07361b26a8` | Read + notify |
+| Control | `e6d2c0aa-0a6f-4f42-9f6d-4a3b7b4a1002` | Write |
+
+The device advertises as `AirWatch-XXXX`. The APK scans for that name/service, connects, requests an increased ATT MTU, enables status notifications, and publishes each received JSON object to the React app. Notifications use indexed BLE fragments that the Android plugin reassembles, so status transfer also works when a phone keeps the default ATT MTU. Status notifications are sent every two seconds; sensor measurements are sampled every two seconds.
+
+Each notification fragment is `A:` + a two-digit hex sequence number + a two-digit hex zero-based fragment index + a two-digit hex fragment count + `:` + up to 11 bytes of JSON. The app combines fragments in order and publishes the JSON only after the complete message arrives.
+
+## Status message
+
+The status characteristic contains one complete UTF-8 JSON object with the fields below:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `setupRequired` | boolean | Always `false`; no Wi-Fi setup step exists |
+| `valid` | boolean | Whether the SCD41 reading is usable |
+| `co2`, `temperature`, `humidity` | finite number | Latest values; display only when `valid` is true |
+| `quality` | string | Project indicator band, not medical/regulatory advice |
+| `displayTheme` | `light` or `dark` | Current TFT theme |
 | `fanOn`, `muted`, `alarmActive`, `systemOn` | boolean | Output and device state |
 | `fanMode` | `auto`, `on`, or `off` | Requested fan mode |
-| `uptimeSeconds`, `lastReadingUptime`, `lastReadingEpoch` | finite number | Device uptime in seconds; last-reading uptime in milliseconds; epoch seconds or `0` when clock is unset |
-| `wifi` | object | `connected` boolean and `ssid`, `ip`, `apSSID`, `apIP` strings |
+| `uptimeSeconds`, `lastReadingUptime`, `lastReadingEpoch` | finite number | Uptime in seconds, sample uptime in milliseconds, and UTC epoch of the latest sample (zero until phone sync) |
+| `wifi` | object | Compatibility-only: all fields empty and `connected` is false |
 
-When there is no fresh sensor reading, the serializer returns `valid: false`, zero numeric readings, and `quality: "unavailable"`. The dashboard must gate values on `valid`; the zeros are placeholders required by its current numeric type and are not measurements. A reading becomes stale after 15 seconds. The `quality` strings are project indicator bands, not medical or regulatory classifications.
+When no usable reading is available, `valid` is false, numeric readings are zero placeholders, and `quality` is `WAITING`. The frontend must not show those placeholders as measurements. The Android app builds its in-memory chart history from notifications; firmware samples and app history are not durable across restarts or app-data removal.
 
-`GET /api/history` returns `{ "samples": [...] }`. Each sample contains numeric `uptime` (seconds), `epoch` (currently always zero), `co2`, `temp`, and `hum`. Empty samples are valid. It retains at most 60 samples in RAM and clears after reboot.
+## Control writes
 
-Mutations return `{ "ok": true }` on success and JSON `{ "error": "..." }` on failure. Implemented statuses include 400 invalid JSON/body, 401 missing or incorrect key, 413 body too large, and 404 unknown API route. The UI sends these JSON bodies:
+Write a UTF-8 JSON object to the control characteristic:
 
 ```json
 {"fanMode":"auto"}
@@ -38,13 +49,9 @@ Mutations return `{ "ok": true }` on success and JSON `{ "error": "..." }` on fa
 ```
 
 ```json
-{"ssid":"YOUR_SSID","password":"YOUR_PASSWORD"}
+{"unixTime":1795363200}
 ```
 
-The fan, mute, and display-theme payloads go to `POST /api/control`; the Wi-Fi payload goes to `POST /api/wifi`. Both require `X-AirWatch-Key` and `Content-Type: application/json`. Bodies over 256 bytes are rejected. The SSID must be 1–32 characters and the password at most 63 characters. Wi-Fi settings and the TFT theme persist in NVS. The generated AP password and key are revealed on the TFT Network page after a three-second physical button hold and remain visible for 30 seconds.
+The APK sends the phone's UTC epoch seconds after connecting. The firmware uses it to set the clock and displays Philippine Standard Time (UTC+8). Supported values are `fanMode: auto|on|off`, `muted: true|false`, `displayTheme: light|dark`, and `unixTime` from 2023 through 2100. Invalid or empty commands are rejected by firmware. After a successful write, the device notifies the updated status. Theme selection is saved in NVS; fan mode and mute state return to their defaults after reboot.
 
-## Client behavior
-
-The runtime client rejects malformed success JSON, surfaces a JSON `error` when supplied on non-2xx responses, times out after 4.5 seconds, and reports unreachable devices as `Cannot reach AirWatch device`. Polling is sequential at four-second intervals. The access key remains React memory state and is not written to local storage or a URL.
-
-The device API is plain HTTP. Treat it as trusted-LAN only; do not port-forward it or expose it to the internet. Render hosts the static frontend only. A secure cloud gateway is not implemented.
+BLE access is not paired or authenticated in this prototype. A nearby BLE client may read device status and send controls; use the device only in a trusted environment.

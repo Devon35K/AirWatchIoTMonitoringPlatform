@@ -11,11 +11,12 @@ export interface DeviceStatus {
 export interface HistorySample { uptime: number; epoch: number; co2: number; temp: number; hum: number }
 export interface SensorHistory { samples: HistorySample[] }
 const timeoutMs = 4500;
+const apiBaseUrl = import.meta.env.VITE_AIRWATCH_API_URL ?? "";
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${import.meta.env.VITE_AIRWATCH_API_URL ?? ""}${path}`, {
+    const response = await fetch(`${apiBaseUrl}${path}`, {
       ...init, signal: controller.signal, headers: { Accept: "application/json", ...init?.headers },
     });
     if (!response.ok) {
@@ -32,8 +33,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } finally { window.clearTimeout(timer); }
 }
 export const getDeviceStatus = () => request<DeviceStatus>("/api/status", { cache: "no-store" });
-export const completeDeviceSetup = (accessKey: string, apPassword: string) =>
-  request<{ ok: boolean }>("/api/setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accessKey, apPassword }) });
 export const getSensorHistory = () => request<SensorHistory>("/api/history", { cache: "no-store" });
 async function control(body: object, key: string) {
   return request<{ ok: boolean }>("/api/control", { method: "POST", headers: { "Content-Type": "application/json", "X-AirWatch-Key": key }, body: JSON.stringify(body) });
@@ -41,5 +40,3 @@ async function control(body: object, key: string) {
 export const setFanMode = (fanMode: DeviceStatus["fanMode"], key: string) => control({ fanMode }, key);
 export const setBuzzerMuted = (muted: boolean, key: string) => control({ muted }, key);
 export const setDisplayTheme = (displayTheme: DeviceStatus["displayTheme"], key: string) => control({ displayTheme }, key);
-export const saveWiFiCredentials = (ssid: string, password: string, key: string) =>
-  request<{ ok: boolean }>("/api/wifi", { method: "POST", headers: { "Content-Type": "application/json", "X-AirWatch-Key": key }, body: JSON.stringify({ ssid, password }) });

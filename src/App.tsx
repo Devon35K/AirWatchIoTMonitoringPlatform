@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import QRCode from "qrcode";
+import { Capacitor } from "@capacitor/core";
 import { useAirWatch } from "./hooks/useAirWatch";
-import { completeDeviceSetup, saveWiFiCredentials, setBuzzerMuted, setDisplayTheme, setFanMode } from "./services/airwatchApi";
+import { useCloudAccount } from "./hooks/useCloudAccount";
+import { setBuzzerMuted, setDisplayTheme, setFanMode } from "./services/airwatchApi";
+import { bluetooth, type BluetoothDeviceInfo } from "./services/airwatchBluetooth";
+import { supabaseConfigured } from "./services/supabase";
+import CloudAccountScreen from "./components/CloudAccountScreen";
 
 type IconName =
   | "air"
@@ -36,7 +40,8 @@ type IconName =
   | "arrow"
   | "power"
   | "qr"
-  | "signal";
+  | "signal"
+  | "bluetooth";
 
 function Icon({
   name,
@@ -228,6 +233,11 @@ function Icon({
         <path d="M5 20v-3M10 20v-7M15 20V9M20 20V4" />
       </>
     ),
+    bluetooth: (
+      <>
+        <path d="m7 7 10 10-5 4V3l5 4L7 17" />
+      </>
+    ),
   };
   return (
     <svg
@@ -251,7 +261,7 @@ const navItems = [
   ["Live Monitoring", "pulse"],
   ["Historical Data", "history"],
   ["Device Controls", "sliders"],
-  ["Wi-Fi & Connectivity", "wifi"],
+  ["Bluetooth Connection", "bluetooth"],
   ["Settings", "settings"],
   ["About AirWatch", "info"],
 ] as const;
@@ -296,6 +306,109 @@ function Logo({ compact = false }: { compact?: boolean }) {
           <div className="logo-sub">Wireless Air Tracking</div>
         </div>
       )}
+    </div>
+  );
+}
+
+function StartupGuide({
+  onClose,
+  onOpenPage,
+}: {
+  onClose: () => void;
+  onOpenPage: (page: string) => void;
+}) {
+  const [step, setStep] = useState(0);
+  const slides = [
+    {
+      icon: "pulse" as IconName,
+      eyebrow: "Welcome to AirWatch",
+      title: "Know the air around you",
+      text: "See live CO₂, temperature, humidity, and air-quality status from your ESP32-S3 device.",
+      target: "Overview",
+      targetLabel: "Open overview",
+    },
+    {
+      icon: "bluetooth" as IconName,
+      eyebrow: "Connect your device",
+      title: "AirWatch connects automatically",
+      text: "The Android app scans for the AirWatch device, connects over Bluetooth, and receives live readings automatically. No router or internet connection is needed.",
+      target: "Bluetooth Connection",
+      targetLabel: "Open connection setup",
+    },
+    {
+      icon: "monitor" as IconName,
+      eyebrow: "Monitor in real time",
+      title: "Watch live sensor readings",
+      text: "Use Overview for a quick summary and Live Monitoring for charts and recent device samples.",
+      target: "Live Monitoring",
+      targetLabel: "Open live monitoring",
+    },
+    {
+      icon: "sliders" as IconName,
+      eyebrow: "Control safely",
+      title: "Manage device features",
+      text: "Use Device Controls for the fan, buzzer, display theme, and alerts. Your changes are sent only after device confirmation.",
+      target: "Device Controls",
+      targetLabel: "Open device controls",
+    },
+  ];
+  const current = slides[step];
+  return (
+    <div className="startup-overlay" role="dialog" aria-modal="true" aria-label="AirWatch startup guide">
+      <div className="startup-card">
+        <button className="startup-close" onClick={onClose} aria-label="Skip startup guide">
+          <Icon name="x" size={18} />
+        </button>
+        <div className="startup-art">
+          <span className="startup-orbit orbit-one" />
+          <span className="startup-orbit orbit-two" />
+          <div className="startup-icon">
+            <Icon name={current.icon} size={42} strokeWidth={1.6} />
+          </div>
+        </div>
+        <div className="startup-copy">
+          <span className="eyebrow">{current.eyebrow}</span>
+          <h2>{current.title}</h2>
+          <p>{current.text}</p>
+        </div>
+        <div className="startup-footer">
+          <div className="startup-dots" aria-label={`Guide step ${step + 1} of ${slides.length}`}>
+            {slides.map((_, index) => (
+              <button
+                key={index}
+                className={index === step ? "active" : ""}
+                onClick={() => setStep(index)}
+                aria-label={`Go to guide step ${index + 1}`}
+              />
+            ))}
+          </div>
+          <div className="startup-actions">
+            {step > 0 && (
+              <button className="startup-secondary" onClick={() => setStep((value) => value - 1)}>
+                Back
+              </button>
+            )}
+            {step > 0 && (
+              <button
+                className="startup-secondary"
+                onClick={() => {
+                  window.localStorage.setItem("airwatch-startup-guide-v1", "done");
+                  onOpenPage(current.target);
+                }}
+              >
+                {current.targetLabel}
+              </button>
+            )}
+            <button
+              className="startup-primary"
+              onClick={() => (step === slides.length - 1 ? onClose() : setStep((value) => value + 1))}
+            >
+              {step === slides.length - 1 ? "Start using AirWatch" : "Next"}
+              <Icon name="arrow" size={17} />
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -827,11 +940,18 @@ function ControlsPage({ toast }: { toast: (text: string) => void }) {
   const [controlError, setControlError] = useState("");
   const [pending, setPending] = useState(false);
   const command = async (action: "auto" | "on" | "off" | "mute" | "unmute") => {
-    if (!deviceKey.trim()) { setControlError("Enter the device access key shown on TFT Page 3."); return; }
+    if (!Capacitor.isNativePlatform() && !deviceKey.trim()) { setControlError("Enter the device access key shown on TFT Page 3."); return; }
     setPending(true); setControlError("");
     try {
-      if (action === "mute" || action === "unmute") await setBuzzerMuted(action === "mute", deviceKey.trim());
-      else await setFanMode(action, deviceKey.trim());
+      if (action === "mute" || action === "unmute") {
+        const muted = action === "mute";
+        if (Capacitor.isNativePlatform()) await bluetooth.setControl({ muted });
+        else await setBuzzerMuted(muted, deviceKey.trim());
+      } else if (Capacitor.isNativePlatform()) {
+        await bluetooth.setControl({ fanMode: action });
+      } else {
+        await setFanMode(action, deviceKey.trim());
+      }
       await refresh(); toast("AirWatch confirmed the command");
     } catch (e) { setControlError(e instanceof Error ? e.message : "Command failed"); if (e instanceof Error && (e.message.includes("403") || e.message.includes("Incorrect device access key"))) setDeviceKey(""); }
     finally { setPending(false); }
@@ -839,7 +959,8 @@ function ControlsPage({ toast }: { toast: (text: string) => void }) {
   return <div className="page-stack">
     <PageHeading eyebrow="Remote management" title="Device controls" description="Fan and buzzer commands require confirmation from the connected ESP32." action={<StatusDot online={!!status} label={status ? "Device online" : "Device offline"} />} />
     <section className="panel settings-card">
-      <label>Device access key (shown on TFT Page 3)<input type="password" autoComplete="off" value={deviceKey} onChange={(e) => setDeviceKey(e.target.value)} /></label>
+      {!Capacitor.isNativePlatform() && <label>Device access key (shown on TFT Page 3)<input type="password" autoComplete="off" value={deviceKey} onChange={(e) => setDeviceKey(e.target.value)} /></label>}
+      {Capacitor.isNativePlatform() && <p>Commands are sent directly to the connected device over Bluetooth.</p>}
       {(error || controlError) && <p role="alert">{controlError || error}</p>}
     </section>
     <div className="control-grid">
@@ -850,33 +971,73 @@ function ControlsPage({ toast }: { toast: (text: string) => void }) {
     </div>
   </div>;
 }
-function WifiPage({ toast, qrUrl }: { toast: (text: string) => void; qrUrl: string }) {
-  const { status, error, refresh, accessKey: key, setAccessKey: setKey } = useAirWatch();
-  const [ssid, setSSID] = useState(""); const [password, setPassword] = useState(""); const [message, setMessage] = useState(""); const [saving, setSaving] = useState(false);
-  const [newKey, setNewKey] = useState(""); const [apPassword, setApPassword] = useState("");
-  const address = window.location.origin;
-  const saveNetwork = async (event: FormEvent) => {
-    event.preventDefault(); setMessage("");
-    if (!key.trim()) { setMessage("Enter the access key shown on TFT Page 3."); return; }
-    setSaving(true);
-    try { await saveWiFiCredentials(ssid.trim(), password, key.trim()); setPassword(""); setMessage("Credentials accepted. The device is attempting to join this 2.4 GHz network."); toast("Wi-Fi credentials sent to AirWatch"); window.setTimeout(() => void refresh(), 3000); }
-    catch (e) { setMessage(e instanceof Error ? e.message : "Could not configure Wi-Fi"); if (e instanceof Error && e.message.includes("Incorrect device access key")) setKey(""); }
-    finally { setSaving(false); }
-  };
-  const finishSetup = async (event: FormEvent) => {
-    event.preventDefault(); setMessage(""); setSaving(true);
-    try { await completeDeviceSetup(newKey, apPassword); setNewKey(""); setApPassword(""); setMessage("Security saved. Reconnect to the AirWatch access point using the password you chose."); toast("AirWatch security configured"); window.setTimeout(() => void refresh(), 1000); }
-    catch (e) { setMessage(e instanceof Error ? e.message : "Could not configure device security"); }
-    finally { setSaving(false); }
+function BluetoothPage() {
+  const { status, error, bluetoothConnected } = useAirWatch();
+  const [bluetoothDevices, setBluetoothDevices] = useState<BluetoothDeviceInfo[]>([]);
+  const [bluetoothScanning, setBluetoothScanning] = useState(false);
+  const [bluetoothMessage, setBluetoothMessage] = useState("");
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let active = true;
+    const listeners: Array<{ remove(): Promise<void> }> = [];
+    void bluetooth.onDeviceFound((device) => {
+      if (!active) return;
+      setBluetoothDevices((current) =>
+        current.some((item) => item.address === device.address)
+          ? current
+          : [...current, device],
+      );
+    }).then((listener) => listeners.push(listener));
+    void bluetooth.onScanFinished(() => {
+      if (active) setBluetoothScanning(false);
+    }).then((listener) => listeners.push(listener));
+    return () => {
+      active = false;
+      listeners.forEach((listener) => void listener.remove());
+    };
+  }, []);
+  const scanBluetooth = async () => {
+    setBluetoothDevices([]);
+    setBluetoothMessage("");
+    setBluetoothScanning(true);
+    try {
+      await bluetooth.scan();
+    } catch (error) {
+      setBluetoothScanning(false);
+      setBluetoothMessage(error instanceof Error ? error.message : "Bluetooth scan failed");
+    }
   };
   return <div className="page-stack">
-    <PageHeading eyebrow="Local network" title="Wi-Fi & connectivity" description="Device network status and 2.4 GHz network setup." action={<button className="secondary-btn" onClick={() => void refresh()}><Icon name="refresh" size={17} />Reconnect</button>} />
+    <PageHeading eyebrow="Device connection" title="Bluetooth connection" description="The AirWatch APK connects directly to the ESP32 and receives live sensor updates over Bluetooth Low Energy." />
     <div className="wifi-layout"><div className="wifi-main">
-      <section className="panel network-hero"><div className="signal-orb"><Icon name="wifi" size={32} /></div><div><span className="eyebrow">Connection status</span><h2>{status?.wifi.connected ? `Connected to ${status.wifi.ssid}` : "Router disconnected"}</h2><p>{status?.wifi.connected ? `Device IP ${status.wifi.ip}` : error || "Check device or connect to its setup access point"}</p></div><StatusDot online={!!status} label={status ? status.wifi.connected ? "Online" : "Setup mode" : "Offline"} /></section>
-      <section className="panel network-details"><h2>Network details</h2><div className="detail-grid"><div><span>Router SSID</span><b>{status?.wifi.ssid || "Not connected"}</b></div><div><span>Device IP address</span><b>{status?.wifi.ip || "—"}</b></div><div><span>Setup access point</span><b>{status?.wifi.apSSID || "Unavailable"}</b></div><div><span>Setup AP address</span><b>{status?.wifi.apIP || "192.168.4.1"}</b></div><div><span>Dashboard address</span><b>{address}</b></div><div><span>Sensor</span><b>{status?.valid ? "SCD41 available" : "Waiting for SCD41"}</b></div></div></section>
-      {status?.setupRequired && <section className="panel setup-steps"><h2>Secure your AirWatch device</h2><p>The setup access point currently has no password. Choose its password and a control key to finish first-time setup.</p><form onSubmit={finishSetup} className="wifi-form"><label>New device control key<input type="password" autoComplete="new-password" value={newKey} onChange={(e) => setNewKey(e.target.value)} minLength={12} maxLength={64} required /></label><label>New setup Wi-Fi password<input type="password" autoComplete="new-password" value={apPassword} onChange={(e) => setApPassword(e.target.value)} minLength={8} maxLength={63} required /></label><button className="secondary-btn" type="submit" disabled={saving}>{saving ? "Saving…" : "Set passwords"}</button>{message && <p role="status">{message}</p>}</form></section>}
-      <section className="panel setup-steps"><h2>Configure Wi-Fi</h2><p>The device supports 2.4 GHz Wi-Fi. If it is offline, connect your browser to its setup access point first.</p><form onSubmit={saveNetwork} className="wifi-form"><label>AirWatch access key<input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} required /></label><label>Network name (SSID)<input value={ssid} onChange={(e) => setSSID(e.target.value)} maxLength={32} required /></label><label>Network password<input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} maxLength={63} /></label><button className="secondary-btn" type="submit" disabled={saving}>{saving ? "Sending…" : "Save Wi-Fi credentials"}</button>{message && <p role="status">{message}</p>}</form></section>
-    </div><aside className="panel qr-card"><span className="eyebrow">Quick access</span><h2>Open this dashboard</h2><p>Scan while connected to the same network as the device.</p><div className="qr-frame">{qrUrl ? <img src={qrUrl} alt={`QR code for ${address}`} /> : <div className="qr-loading">Generating…</div>}</div><div className="url-chip"><Icon name="shield" size={16} /><span>{address}</span></div><small>For device-served offline use, this URL is the ESP32 address.</small></aside></div>
+        <section className="panel bluetooth-card">
+          <div className="bluetooth-head">
+            <span className="control-main-icon"><Icon name="bluetooth" /></span>
+            <div>
+              <span className="eyebrow">Phone to device</span>
+              <h2>Bluetooth setup</h2>
+            </div>
+            <StatusDot online={bluetoothConnected} label={bluetoothConnected ? "Bluetooth connected" : "Not connected"} />
+          </div>
+          <p>Keep Bluetooth enabled. The APK automatically connects to an AirWatch device and streams its sensor status.</p>
+          {Capacitor.isNativePlatform()
+            ? <div className="bluetooth-actions"><button className="secondary-btn" onClick={() => void scanBluetooth()} disabled={bluetoothScanning}><Icon name="refresh" size={16} />{bluetoothScanning ? "Scanning…" : "Scan for AirWatch"}</button></div>
+            : <p>Install and open the Android APK to connect to the device over Bluetooth.</p>}
+          {bluetoothDevices.length > 0 && (
+            <div className="bluetooth-results">
+              {bluetoothDevices.map((device) => (
+                <div key={device.address} className="bluetooth-result">
+                  <span className="device-avatar"><Icon name="bluetooth" /></span>
+                  <span><b>{device.name || "AirWatch device"}</b><small>{device.address}</small></span>
+                </div>
+              ))}
+            </div>
+          )}
+          {bluetoothMessage && <p className="bluetooth-message" role="status">{bluetoothMessage}</p>}
+        </section>
+      {Capacitor.isNativePlatform() && error && <p className="bluetooth-message" role="status">{error}</p>}
+      <section className="panel network-hero"><div className="signal-orb"><Icon name="bluetooth" size={32} /></div><div><span className="eyebrow">Connection status</span><h2>{bluetoothConnected ? "Connected over Bluetooth" : "Looking for AirWatch"}</h2><p>{status?.valid ? `Live reading: ${status.co2} ppm CO₂` : "Sensor data appears here when the phone receives the next update."}</p></div><StatusDot online={bluetoothConnected} label={bluetoothConnected ? "BLE connected" : "Waiting"} /></section>
+    </div></div>
   </div>;
 }
 function SettingsPage() {
@@ -960,7 +1121,7 @@ function AboutPage() {
         <Icon name="arrow" />
         <span>ESP32-S3</span>
         <Icon name="arrow" />
-        <span>Local Wi-Fi</span>
+        <span>Bluetooth LE</span>
         <Icon name="arrow" />
         <span>Web & mobile</span>
       </div>
@@ -968,7 +1129,7 @@ function AboutPage() {
         <div>
           <Icon name="cpu" />
           <b>ESP32-S3-N16R8</b>
-          <span>Local processing and web server</span>
+          <span>Local processing and BLE service</span>
         </div>
         <div>
           <Icon name="air" />
@@ -991,14 +1152,22 @@ function MobileApp({ onExit }: { onExit: () => void }) {
   const [controlError, setControlError] = useState("");
   const setFan = async (mode: "auto" | "on" | "off") => {
     let key = accessKey;
-    if (!key) { key = window.prompt("Enter the AirWatch access key shown on TFT Page 3") || ""; if (!key) return; setAccessKey(key); }
-    try { await setFanMode(mode, key); await refresh(); setControlError(""); }
+    if (!Capacitor.isNativePlatform() && !key) { key = window.prompt("Enter the AirWatch access key shown on TFT Page 3") || ""; if (!key) return; setAccessKey(key); }
+    try {
+      if (Capacitor.isNativePlatform()) await bluetooth.setControl({ fanMode: mode });
+      else await setFanMode(mode, key);
+      await refresh(); setControlError("");
+    }
     catch (e) { setControlError(e instanceof Error ? e.message : "Fan command failed"); }
   };
   const setMute = async (muted: boolean) => {
     let key = accessKey;
-    if (!key) { key = window.prompt("Enter the AirWatch access key shown on TFT Page 3") || ""; if (!key) return; setAccessKey(key); }
-    try { await setBuzzerMuted(muted, key); await refresh(); setControlError(""); }
+    if (!Capacitor.isNativePlatform() && !key) { key = window.prompt("Enter the AirWatch access key shown on TFT Page 3") || ""; if (!key) return; setAccessKey(key); }
+    try {
+      if (Capacitor.isNativePlatform()) await bluetooth.setControl({ muted });
+      else await setBuzzerMuted(muted, key);
+      await refresh(); setControlError("");
+    }
     catch (e) { setControlError(e instanceof Error ? e.message : "Buzzer command failed"); }
   };
   return (
@@ -1218,7 +1387,7 @@ function MobileApp({ onExit }: { onExit: () => void }) {
   );
 }
 
-function DeviceUI({ onExit, qrUrl }: { onExit: () => void; qrUrl: string }) {
+function DeviceUI({ onExit }: { onExit: () => void }) {
   const { status } = useAirWatch();
   const [page, setPage] = useState(2);
   const uptime = status?.uptimeSeconds ?? 0;
@@ -1226,7 +1395,7 @@ function DeviceUI({ onExit, qrUrl }: { onExit: () => void; qrUrl: string }) {
     ? status.lastReadingEpoch + Math.max(0, status.uptimeSeconds - status.lastReadingUptime / 1000)
     : 0;
   const deviceTime = deviceEpoch ? new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(deviceEpoch * 1000)) : "Syncing time";
-  const deviceDate = deviceEpoch ? new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", weekday: "long", month: "short", day: "numeric", year: "numeric" }).format(new Date(deviceEpoch * 1000)) : "Connect the device to Wi-Fi";
+  const deviceDate = deviceEpoch ? new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", weekday: "long", month: "short", day: "numeric", year: "numeric" }).format(new Date(deviceEpoch * 1000)) : "Clock not synchronized";
   return (
     <div className="showcase-screen device-showcase">
       <div className="showcase-top">
@@ -1298,19 +1467,19 @@ function DeviceUI({ onExit, qrUrl }: { onExit: () => void; qrUrl: string }) {
               <div className="device-page device-qr">
                 <header>
                   <span>
-                    <Icon name="wifi" size={16} /> {status?.wifi.connected ? "CONNECTED" : "SETUP MODE"}
+                    <Icon name="bluetooth" size={16} /> BLUETOOTH
                   </span>
-                  <b>AIRWATCH LAB</b>
+                  <b>AIRWATCH DEVICE</b>
                 </header>
                 <div className="device-qr-body">
                   <div className="device-qr-box">
-                    {qrUrl && <img src={qrUrl} alt="Dashboard QR" />}
+                    <Icon name="bluetooth" size={52} />
                   </div>
                   <div>
-                    <span>SCAN TO OPEN</span>
-                    <b>DASHBOARD</b>
-                    <p>{status?.wifi.ip || status?.wifi.apIP || window.location.hostname}</p>
-                    <small>Same Wi-Fi required</small>
+                    <span>OPEN THE APK</span>
+                    <b>SCAN &amp; CONNECT</b>
+                    <p>{status ? "Live status received" : "Waiting for phone connection"}</p>
+                    <small>BLE status and controls</small>
                   </div>
                 </div>
               </div>
@@ -1341,7 +1510,7 @@ function DeviceUI({ onExit, qrUrl }: { onExit: () => void; qrUrl: string }) {
         </div>
         <div className="device-copy">
           <span className="eyebrow">Page {page + 1} of 4</span>
-          <h2>{["Live air quality", "Device uptime", "Wi-Fi & QR access", "Time & date"][page]}</h2>
+          <h2>{["Live air quality", "Device uptime", "Bluetooth connection", "Time & date"][page]}</h2>
           <p>Use the on-screen arrows to preview the swipe-left and swipe-right interaction.</p>
           <div className="dimension-chip">240 px x 320 px · portrait</div>
         </div>
@@ -1362,24 +1531,23 @@ function ApiPage() {
       <section className="panel api-panel">
         <div>
           <span className="eyebrow">Firmware contract</span>
-          <h2>Local REST API</h2>
-            <p>Endpoints implemented by the supplied AirWatch v2.1 firmware.</p>
+          <h2>Bluetooth Low Energy</h2>
+            <p>The APK reads live status notifications and sends control commands over the AirWatch BLE service.</p>
         </div>
         <div className="endpoint-list">
           <code>
-            <b>GET</b> /api/status{" "}
-            <span>valid, co2, temperature, humidity, quality, fanMode, muted, wifi, uptime</span>
+            <b>Service</b> 4fafc201-1fb5-459e-8fcc-c5c9c331914b
+            <span>Advertised as AirWatch-XXXX over Bluetooth Low Energy</span>
           </code>
-          <code><b>GET</b> /api/history <span>samples[]: uptime, epoch, co2, temp, hum</span></code>
-          <code><b>POST</b> /api/control <span>fanMode, muted, displayTheme: light|dark</span></code>
-          <code><b>POST</b> /api/wifi <span>ssid, password</span></code>
+          <code><b>Notify</b> beb5483e-36e1-4688-b7f5-ea07361b26a8 <span>JSON sensor readings and device status</span></code>
+          <code><b>Write</b> e6d2c0aa-0a6f-4f42-9f6d-4a3b7b4a1002 <span>Fan, mute, and display-theme controls</span></code>
         </div>
         <div className="api-note">
-          <Icon name="shield" />
+          <Icon name="bluetooth" />
           <p>
-            <b>Confirmation-first controls</b>
+            <b>Local Bluetooth connection</b>
             <span>
-              Control requests require <code>X-AirWatch-Key</code> and succeed only after the ESP32 returns <code>{"{\"ok\":true}"}</code>.
+              Wi-Fi, HTTP, and cloud connectivity are not used by the firmware. Connect only to your AirWatch device.
             </span>
           </p>
         </div>
@@ -1389,14 +1557,17 @@ function ApiPage() {
 }
 
 export default function App() {
-  const { status, lastSuccess, accessKey, setAccessKey, refresh } = useAirWatch();
+  const { status, lastSuccess, accessKey, setAccessKey, refresh, bluetoothConnected, cloudSyncError } = useAirWatch();
+  const cloudAccount = useCloudAccount();
   const [active, setActive] = useState("Overview");
   const [dark, setDark] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showStartupGuide, setShowStartupGuide] = useState(
+    () => Capacitor.isNativePlatform() && window.localStorage.getItem("airwatch-startup-guide-v1") !== "done",
+  );
   const [showcase, setShowcase] = useState<"web" | "mobile" | "device">("web");
   const [toast, setToast] = useState("");
   const [themePending, setThemePending] = useState(false);
-  const [qrUrl, setQrUrl] = useState("");
   const now = useMemo(
     () =>
       new Intl.DateTimeFormat("en", {
@@ -1414,13 +1585,6 @@ export default function App() {
   useEffect(() => {
     if (status?.displayTheme) setDark(status.displayTheme === "dark");
   }, [status?.displayTheme]);
-  useEffect(() => {
-    QRCode.toDataURL(window.location.origin, {
-      width: 360,
-      margin: 1,
-      color: { dark: "#102A43", light: "#FFFFFF" },
-    }).then(setQrUrl);
-  }, []);
   const notify = (text: string) => {
     setToast(text);
     setTimeout(() => setToast(""), 2400);
@@ -1429,7 +1593,7 @@ export default function App() {
     const nextTheme = dark ? "light" : "dark";
     setDark(nextTheme === "dark");
     let key = accessKey.trim();
-    if (!key) {
+    if (!Capacitor.isNativePlatform() && !key) {
       key = window.prompt("Enter the AirWatch control key shown on the TFT Network page")?.trim() ?? "";
       if (!key) {
         notify(`Website changed to ${nextTheme}; enter the device key to sync the TFT`);
@@ -1439,18 +1603,23 @@ export default function App() {
     }
     setThemePending(true);
     try {
-      await setDisplayTheme(nextTheme, key);
+      if (Capacitor.isNativePlatform()) await bluetooth.setControl({ displayTheme: nextTheme });
+      else await setDisplayTheme(nextTheme, key);
       await refresh();
       notify(`Website and TFT switched to ${nextTheme} mode`);
     } catch (error) {
-      if (error instanceof Error && error.message.toLowerCase().includes("unauthorized")) setAccessKey("");
+      if (!Capacitor.isNativePlatform() && error instanceof Error && error.message.toLowerCase().includes("unauthorized")) setAccessKey("");
       notify(`Website changed to ${nextTheme}, but TFT sync failed: ${error instanceof Error ? error.message : "device unavailable"}`);
     } finally {
       setThemePending(false);
     }
   };
-  if (showcase === "mobile") return <MobileApp onExit={() => setShowcase("web")} />;
-  if (showcase === "device") return <DeviceUI onExit={() => setShowcase("web")} qrUrl={qrUrl} />;
+  if (cloudAccount.configured && cloudAccount.loading) {
+    return <main className="cloud-auth-page"><p role="status">Loading your private AirWatch account…</p></main>;
+  }
+  if (cloudAccount.configured && !cloudAccount.user) return <CloudAccountScreen />;
+  if (!Capacitor.isNativePlatform() && showcase === "mobile") return <MobileApp onExit={() => setShowcase("web")} />;
+  if (!Capacitor.isNativePlatform() && showcase === "device") return <DeviceUI onExit={() => setShowcase("web")} />;
   const go = (name: string) => {
     setActive(name);
     setMenuOpen(false);
@@ -1458,6 +1627,19 @@ export default function App() {
   };
   return (
     <div className="app-shell">
+      {showStartupGuide && (
+        <StartupGuide
+          onClose={() => {
+            window.localStorage.setItem("airwatch-startup-guide-v1", "done");
+            setShowStartupGuide(false);
+          }}
+          onOpenPage={(page) => {
+            setActive(page);
+            setMenuOpen(false);
+            setShowStartupGuide(false);
+          }}
+        />
+      )}
       <aside className={`sidebar ${menuOpen ? "open" : ""}`}>
         <div className="sidebar-top">
           <Logo />
@@ -1482,19 +1664,27 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="experience-switch">
-          <span className="nav-label">Interface previews</span>
-          <button onClick={() => setShowcase("mobile")}>
-            <Icon name="phone" />
-            <span>Mobile app</span>
-            <Icon name="chevron" size={15} />
-          </button>
-          <button onClick={() => setShowcase("device")}>
-            <Icon name="cpu" />
-            <span>Device screen</span>
-            <Icon name="chevron" size={15} />
-          </button>
-        </div>
+        {!Capacitor.isNativePlatform() && (
+          <div className="experience-switch">
+            <span className="nav-label">Interface previews</span>
+            <button onClick={() => setShowcase("mobile")}>
+              <Icon name="phone" />
+              <span>Mobile app</span>
+              <Icon name="chevron" size={15} />
+            </button>
+            <button onClick={() => setShowcase("device")}>
+              <Icon name="cpu" />
+              <span>Device screen</span>
+              <Icon name="chevron" size={15} />
+            </button>
+          </div>
+        )}
+        {!Capacitor.isNativePlatform() && (
+          <a className="apk-download-link" href="/downloads/airwatch.apk" download>
+            <Icon name="download" size={17} />
+            <span>Download Android APK</span>
+          </a>
+        )}
         <div className="sidebar-device">
           <div>
             <span className="device-avatar">
@@ -1503,12 +1693,15 @@ export default function App() {
             <p>
               <b>AirWatch Device</b>
               <small>
-                <i /> {status ? status.wifi.connected ? "Router connected" : "Setup access point" : "Disconnected"}
+                <i /> {bluetoothConnected ? "Bluetooth connected" : "Disconnected"}
               </small>
             </p>
             <button>•••</button>
           </div>
-          <span>ESP32-S3 · {status?.wifi.ip || status?.wifi.apIP || "No device address"}</span>
+          <span>ESP32-S3 · {bluetoothConnected ? "BLE link active" : "Bluetooth unavailable"}</span>
+          {cloudAccount.configured && cloudAccount.user && (
+            <button className="sidebar-account-button" onClick={() => void cloudAccount.signOut()}>Sign out</button>
+          )}
         </div>
       </aside>
       {menuOpen && (
@@ -1546,11 +1739,17 @@ export default function App() {
           </div>
         </header>
         <main className="content">
-          {active === "Overview" && <Overview onConnectionClick={() => go("Wi-Fi & Connectivity")} />}
+          {!Capacitor.isNativePlatform() && !supabaseConfigured && (
+            <div className="cloud-setup-notice" role="status">
+              Private website readings are not configured yet. Add your Supabase URL and anon key to the deployment environment.
+            </div>
+          )}
+          {cloudSyncError && <div className="cloud-sync-error" role="alert">Cloud sync failed: {cloudSyncError}</div>}
+          {active === "Overview" && <Overview onConnectionClick={() => go("Bluetooth Connection")} />}
           {active === "Live Monitoring" && <ApiPage />}
           {active === "Historical Data" && <HistoryPage />}
           {active === "Device Controls" && <ControlsPage toast={notify} />}
-          {active === "Wi-Fi & Connectivity" && <WifiPage toast={notify} qrUrl={qrUrl} />}
+          {active === "Bluetooth Connection" && <BluetoothPage />}
           {active === "Settings" && <SettingsPage />}
           {active === "About AirWatch" && <AboutPage />}
         </main>
