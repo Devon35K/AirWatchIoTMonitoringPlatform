@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useCloudAccount } from "../hooks/useCloudAccount";
 
-export default function CloudAccountScreen() {
+export default function CloudAccountScreen({ onBack }: { onBack?: () => void }) {
   const { initializationError, signIn, signUp } = useCloudAccount();
   const [creatingAccount, setCreatingAccount] = useState(false);
   const [email, setEmail] = useState("");
@@ -34,6 +34,11 @@ export default function CloudAccountScreen() {
   return (
     <main className="cloud-auth-page">
       <section className="cloud-auth-card">
+        {onBack && (
+          <button className="cloud-auth-back" type="button" onClick={onBack}>
+            Back to AirWatch home
+          </button>
+        )}
         <div className="cloud-auth-brand">
           <span className="cloud-auth-mark">A</span>
           <div>

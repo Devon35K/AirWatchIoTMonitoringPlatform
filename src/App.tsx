@@ -310,6 +310,120 @@ function Logo({ compact = false }: { compact?: boolean }) {
   );
 }
 
+function LandingPage({ onOpenDashboard }: { onOpenDashboard: () => void }) {
+  const features: { icon: IconName; title: string; description: string }[] = [
+    {
+      icon: "air",
+      title: "Three useful readings",
+      description: "Track carbon dioxide, temperature, and relative humidity with the device's SCD41 sensor.",
+    },
+    {
+      icon: "monitor",
+      title: "See it on the device",
+      description: "The ESP32-S3 sends readings to its local TFT display and supports on-device alerts and controls.",
+    },
+    {
+      icon: "bluetooth",
+      title: "Connect with your phone",
+      description: "The Android app receives readings over Bluetooth Low Energy. Optional private website history uses Supabase.",
+    },
+  ];
+
+  return (
+    <div className="landing-page">
+      <section className="landing-hero">
+        <div className="landing-copy">
+          <div className="landing-eyebrow">
+            <span />
+            ESP32-S3 INDOOR AIR MONITOR
+          </div>
+          <h1>Know the air <span>around you.</span></h1>
+          <p>
+            AirWatch brings CO₂, temperature, and humidity readings together in one local monitor,
+            with a phone app for viewing your device over Bluetooth.
+          </p>
+          <div className="landing-actions">
+            <a className="landing-download" href="/downloads/airwatch.apk" download>
+              <Icon name="download" size={18} />
+              Download Android APK
+            </a>
+            <button className="landing-dashboard" onClick={onOpenDashboard}>
+              Open Dashboard
+              <Icon name="arrow" size={17} />
+            </button>
+          </div>
+          <div className="landing-connection-note">
+            <Icon name="bluetooth" size={17} />
+            Phone connects directly to the device over Bluetooth Low Energy.
+          </div>
+        </div>
+        <div className="landing-visual" aria-label="Illustration of the AirWatch indoor air monitor">
+          <div className="landing-orbit landing-orbit-one" />
+          <div className="landing-orbit landing-orbit-two" />
+          <div className="landing-device-card">
+            <div className="landing-device-heading">
+              <span className="landing-device-mark"><Icon name="air" size={20} /></span>
+              <span><b>AIRWATCH</b><small>INDOOR AIR MONITOR</small></span>
+              <i />
+            </div>
+            <div className="landing-device-screen">
+              <span className="landing-screen-label">SENSOR MEASUREMENTS</span>
+              <div className="landing-screen-wave">
+                <svg viewBox="0 0 260 70" role="presentation">
+                  <path d="M0 47 C24 46 22 22 45 24 S65 55 88 47 106 18 130 23 153 53 176 44 198 18 220 23 240 43 260 32" />
+                </svg>
+              </div>
+              <div className="landing-reading-labels">
+                <span>CO₂</span><span>TEMPERATURE</span><span>HUMIDITY</span>
+              </div>
+              <div className="landing-screen-foot"><i /> Live readings appear when connected</div>
+            </div>
+            <div className="landing-device-foot">
+              <span>ESP32-S3</span><span>SCD41 SENSOR</span><span>TFT DISPLAY</span>
+            </div>
+          </div>
+          <span className="landing-visual-caption">LOCAL MONITORING · PHONE APP · OPTIONAL PRIVATE HISTORY</span>
+        </div>
+      </section>
+
+      <section className="landing-features">
+        <div className="landing-section-heading">
+          <div>
+            <span className="landing-section-kicker">AIRWATCH AT A GLANCE</span>
+            <h2>Simple readings. Clear connections.</h2>
+          </div>
+          <p>The ESP32 device communicates with the Android app nearby. Cloud history is optional.</p>
+        </div>
+        <div className="landing-feature-grid">
+          {features.map(({ icon, title, description }) => (
+            <article className="landing-feature-card" key={title}>
+              <span className="landing-feature-icon"><Icon name={icon} size={21} /></span>
+              <h3>{title}</h3>
+              <p>{description}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="landing-download-panel">
+        <div>
+          <span className="landing-section-kicker">GET STARTED</span>
+          <h2>Bring AirWatch to your Android phone.</h2>
+          <p>Install the APK, enable Bluetooth, and connect to your AirWatch device.</p>
+        </div>
+        <a className="landing-download" href="/downloads/airwatch.apk" download>
+          <Icon name="download" size={18} />
+          Download the APK
+        </a>
+      </section>
+
+      <p className="landing-disclaimer">
+        AirWatch reports CO₂, temperature, and relative humidity. It is not a full air-pollution or medical safety detector.
+      </p>
+    </div>
+  );
+}
+
 function StartupGuide({
   onClose,
   onOpenPage,
@@ -1559,7 +1673,7 @@ function ApiPage() {
 export default function App() {
   const { status, lastSuccess, accessKey, setAccessKey, refresh, bluetoothConnected, cloudSyncError } = useAirWatch();
   const cloudAccount = useCloudAccount();
-  const [active, setActive] = useState("Overview");
+  const [active, setActive] = useState(Capacitor.isNativePlatform() ? "Overview" : "Home");
   const [dark, setDark] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [showStartupGuide, setShowStartupGuide] = useState(
@@ -1614,10 +1728,12 @@ export default function App() {
       setThemePending(false);
     }
   };
-  if (cloudAccount.configured && cloudAccount.loading) {
+  if (cloudAccount.configured && cloudAccount.loading && (Capacitor.isNativePlatform() || active !== "Home")) {
     return <main className="cloud-auth-page"><p role="status">Loading your private AirWatch account…</p></main>;
   }
-  if (cloudAccount.configured && !cloudAccount.user) return <CloudAccountScreen />;
+  if (cloudAccount.configured && !cloudAccount.user && (Capacitor.isNativePlatform() || active !== "Home")) {
+    return <CloudAccountScreen onBack={!Capacitor.isNativePlatform() ? () => setActive("Home") : undefined} />;
+  }
   if (!Capacitor.isNativePlatform() && showcase === "mobile") return <MobileApp onExit={() => setShowcase("web")} />;
   if (!Capacitor.isNativePlatform() && showcase === "device") return <DeviceUI onExit={() => setShowcase("web")} />;
   const go = (name: string) => {
@@ -1648,11 +1764,16 @@ export default function App() {
           </button>
         </div>
         <nav className="main-nav">
+          <span className="nav-label">Site</span>
+          <button onClick={() => go("Home")} className={active === "Home" ? "active" : ""}>
+            <Icon name="air" />
+            <span>Home</span>
+          </button>
           <span className="nav-label">Monitoring</span>
           {navItems.slice(0, 3).map(([name, icon]) => (
             <button key={name} onClick={() => go(name)} className={active === name ? "active" : ""}>
               <Icon name={icon} />
-              <span>{name}</span>
+              <span>{name === "Overview" ? "Dashboard" : name}</span>
               {name === "Overview" && <i className="nav-live" />}
             </button>
           ))}
@@ -1719,32 +1840,44 @@ export default function App() {
             </button>
             <div>
               <span className="breadcrumb">AirWatch /</span>
-              <b>{active}</b>
+              <b>{active === "Overview" ? "Dashboard" : active}</b>
             </div>
           </div>
           <div className="topbar-right">
-            <div className="top-time">
-              <Icon name="clock" size={17} />
-              <span>{now}</span>
-            </div>
-            <div className="last-sync"><i />{status ? <>Last response <b>{lastSuccess ? new Date(lastSuccess).toLocaleTimeString() : "just now"}</b></> : <b>Device offline</b>}</div>
-            <button className="icon-button" onClick={() => notify("No new alerts")}>
-              <Icon name="bell" />
-              <i />
-            </button>
-            <button className="theme-button" onClick={() => void toggleTheme()} disabled={themePending}>
-              <Icon name={dark ? "sun" : "moon"} />
-              <span>{dark ? "Light" : "Dark"} mode</span>
-            </button>
+            {active === "Home" ? (
+              <a className="topbar-home-download" href="/downloads/airwatch.apk" download>
+                <Icon name="download" size={16} />
+                Get the APK
+              </a>
+            ) : (
+              <>
+                <div className="top-time">
+                  <Icon name="clock" size={17} />
+                  <span>{now}</span>
+                </div>
+                <div className="last-sync"><i />{status ? <>Last response <b>{lastSuccess ? new Date(lastSuccess).toLocaleTimeString() : "just now"}</b></> : <b>Device offline</b>}</div>
+                <button className="icon-button" onClick={() => notify("No new alerts")}>
+                  <Icon name="bell" />
+                  <i />
+                </button>
+                <button className="theme-button" onClick={() => void toggleTheme()} disabled={themePending}>
+                  <Icon name={dark ? "sun" : "moon"} />
+                  <span>{dark ? "Light" : "Dark"} mode</span>
+                </button>
+              </>
+            )}
           </div>
         </header>
         <main className="content">
-          {!Capacitor.isNativePlatform() && !supabaseConfigured && (
+          {active === "Home" && !Capacitor.isNativePlatform() && (
+            <LandingPage onOpenDashboard={() => go("Overview")} />
+          )}
+          {active !== "Home" && !Capacitor.isNativePlatform() && !supabaseConfigured && (
             <div className="cloud-setup-notice" role="status">
               Private website readings are not configured yet. Add your Supabase URL and anon key to the deployment environment.
             </div>
           )}
-          {cloudSyncError && <div className="cloud-sync-error" role="alert">Cloud sync failed: {cloudSyncError}</div>}
+          {active !== "Home" && cloudSyncError && <div className="cloud-sync-error" role="alert">Cloud sync failed: {cloudSyncError}</div>}
           {active === "Overview" && <Overview onConnectionClick={() => go("Bluetooth Connection")} />}
           {active === "Live Monitoring" && <ApiPage />}
           {active === "Historical Data" && <HistoryPage />}
@@ -1755,7 +1888,7 @@ export default function App() {
         </main>
         <footer className="site-footer">
           <span>AirWatch · Wireless Air Tracking & CO₂ Handling</span>
-          <span>Local-only monitoring · Live data when connected</span>
+          <span>{active === "Home" ? "BLE-connected monitoring · Private cloud history optional" : "Live data when connected"}</span>
         </footer>
       </div>
       {toast && (

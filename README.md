@@ -9,7 +9,7 @@ See [`firmware/README.md`](firmware/README.md) for the BLE UUIDs and build instr
 ## App and hosting
 
 - **Android APK:** connects directly to the ESP32 over BLE; the phone and device do not need a router or internet connection.
-- **Web / Render:** `render.yaml` deploys the React/Vite interface as a Static Site (`npm ci`, `npm run build`, publish `dist`).
+- **Web / Render:** `render.yaml` deploys a public AirWatch product page with device information and APK downloads, plus sidebar navigation to the monitoring dashboard.
 - **Private cloud sync:** when configured with Supabase, the signed-in APK forwards valid BLE readings over the phone's internet connection. The signed-in website reads the same account's private history. The ESP32 remains BLE-only.
 - **APK download:** the website's login page and sidebar include a download button for `public/downloads/airwatch.apk`.
 
